@@ -200,6 +200,19 @@ def disable_vendor_configs():
         makefile.write_text(body + extra)
 
 
+def allow_vdso_text_relocs():
+    path = ROOT / "arch/arm64/kernel/vdso/Makefile"
+    text = path.read_text()
+    old = "--build-id -n -T"
+    new = "--build-id -n -z notext -T"
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit("vdso linker flags not found")
+    path.write_text(text.replace(old, new, 1))
+    print("vdso: allow lld text relocations")
+
+
 def main():
     missing = broken_symlinks()
     print(f"broken symlinks: {len(missing)}")
@@ -210,6 +223,7 @@ def main():
     write_sched_assist_headers()
     create_missing_headers()
     neutralize_sched_assist_macro()
+    allow_vdso_text_relocs()
     strip_cr()
     disable_vendor_configs()
 
