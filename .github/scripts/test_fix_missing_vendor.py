@@ -117,6 +117,47 @@ endif
         work / "init/extra.c",
         "#include <linux/not_a_vendor_header.h>\n",
     )
+    write(
+        work / "kernel/sched/core.c",
+        """
+extern int sysctl_set_ux_uclamp_enable;
+unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)
+{
+	struct uclamp_se uc_eff;
+	unsigned int uc_value;
+	if (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable) {
+		uc_value = ux_uclamp_value;
+		if (p->uclamp[clamp_id].active) {
+			if (p->uclamp[clamp_id].value > uc_value)
+				uc_value = p->uclamp[clamp_id].value;
+		 } else {
+			uc_eff =  uclamp_eff_get(p, clamp_id);
+			if (uc_eff.value > uc_value)
+				uc_value = uc_eff.value;
+		}
+		return (unsigned long)uc_value;
+	}
+	if (p->uclamp[clamp_id].active)
+		return (unsigned long)p->uclamp[clamp_id].value;
+}
+	tmp_value = uc_se->value;
+	if (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable)
+		tmp_value = ux_uclamp_value;
+""",
+    )
+    write(
+        work / "mm/vmscan.c",
+        """
+#include <linux/debugfs.h>
+int vm_swappiness = 60;
+#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)
+/*
+ * Direct reclaim swappiness, exptct 0 - 60. Higher means more swappy and slower.
+ */
+int direct_vm_swappiness = 60;
+#endif /*OPLUS_FEATURE_ZRAM_OPT*/
+""",
+    )
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)],
         cwd=work,
@@ -182,6 +223,18 @@ endif
         raise SystemExit("expected exactly the two baseline vendor macros")
     if "vendor include kept:" not in proc.stdout:
         raise SystemExit("broad-guarded vendor include was not reported")
+    core = (work / "kernel/sched/core.c").read_text(encoding="utf-8")
+    if core.count("#ifdef OPLUS_FEATURE_SCHED_ASSIST\n") < 3:
+        raise SystemExit("ux uclamp uses were not guarded")
+    if "\tif (p->uclamp[clamp_id].active)\n" not in core:
+        raise SystemExit("stock uclamp path was dropped")
+    vmscan = (work / "mm/vmscan.c").read_text(encoding="utf-8")
+    if "#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)\n/*\n * Direct reclaim" in vmscan:
+        raise SystemExit("direct_vm_swappiness stayed behind ZRAM_OPT")
+    if "int direct_vm_swappiness = 60;" not in vmscan:
+        raise SystemExit("direct_vm_swappiness declaration missing")
+    if "#include <linux/proc_fs.h>" not in vmscan:
+        raise SystemExit("proc_fs.h was not included")
     print("vendor macro suppression ok")
 
 

@@ -439,6 +439,104 @@ def apply_macro_suppression(macros):
         print(f"  undef {name}")
 
 
+def patch_known_vendor_callers():
+    """Skip unpublished scheduler fields and keep the hybridswap proc node compiling."""
+    core = ROOT / "kernel/sched/core.c"
+    if core.is_file():
+        text = core.read_text()
+        turbo_fn = (
+            "extern int sysctl_set_ux_uclamp_enable;\n"
+            "unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)\n"
+            "{\n"
+            "\tstruct uclamp_se uc_eff;\n"
+            "\tunsigned int uc_value;\n"
+            "\tif (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable) {\n"
+            "\t\tuc_value = ux_uclamp_value;\n"
+            "\t\tif (p->uclamp[clamp_id].active) {\n"
+            "\t\t\tif (p->uclamp[clamp_id].value > uc_value)\n"
+            "\t\t\t\tuc_value = p->uclamp[clamp_id].value;\n"
+            "\t\t } else {\n"
+            "\t\t\tuc_eff =  uclamp_eff_get(p, clamp_id);\n"
+            "\t\t\tif (uc_eff.value > uc_value)\n"
+            "\t\t\t\tuc_value = uc_eff.value;\n"
+            "\t\t}\n"
+            "\t\treturn (unsigned long)uc_value;\n"
+            "\t}\n"
+        )
+        turbo_fn_new = (
+            "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n"
+            "extern int sysctl_set_ux_uclamp_enable;\n"
+            "#endif\n"
+            "unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)\n"
+            "{\n"
+            "\tstruct uclamp_se uc_eff;\n"
+            "\tunsigned int uc_value;\n"
+            "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n"
+            "\tif (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable) {\n"
+            "\t\tuc_value = ux_uclamp_value;\n"
+            "\t\tif (p->uclamp[clamp_id].active) {\n"
+            "\t\t\tif (p->uclamp[clamp_id].value > uc_value)\n"
+            "\t\t\t\tuc_value = p->uclamp[clamp_id].value;\n"
+            "\t\t } else {\n"
+            "\t\t\tuc_eff =  uclamp_eff_get(p, clamp_id);\n"
+            "\t\t\tif (uc_eff.value > uc_value)\n"
+            "\t\t\t\tuc_value = uc_eff.value;\n"
+            "\t\t}\n"
+            "\t\treturn (unsigned long)uc_value;\n"
+            "\t}\n"
+            "#endif\n"
+        )
+        turbo_rq = (
+            "\ttmp_value = uc_se->value;\n"
+            "\tif (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable)\n"
+            "\t\ttmp_value = ux_uclamp_value;\n"
+        )
+        turbo_rq_new = (
+            "\ttmp_value = uc_se->value;\n"
+            "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n"
+            "\tif (p->ux_state & SA_TYPE_TURBO && clamp_id == UCLAMP_MIN && sysctl_set_ux_uclamp_enable)\n"
+            "\t\ttmp_value = ux_uclamp_value;\n"
+            "#endif\n"
+        )
+        if turbo_fn_new in text and turbo_rq_new in text:
+            pass
+        else:
+            if turbo_fn not in text or turbo_rq not in text:
+                raise SystemExit("ux uclamp call sites missing in kernel/sched/core.c")
+            text = text.replace(turbo_fn, turbo_fn_new, 1).replace(turbo_rq, turbo_rq_new, 1)
+            print("guarded ux uclamp uses")
+        core.write_text(text)
+    vmscan = ROOT / "mm/vmscan.c"
+    if vmscan.is_file():
+        text = vmscan.read_text()
+        decl = (
+            "#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)\n"
+            "/*\n"
+            " * Direct reclaim swappiness, exptct 0 - 60. Higher means more swappy and slower.\n"
+            " */\n"
+            "int direct_vm_swappiness = 60;\n"
+            "#endif /*OPLUS_FEATURE_ZRAM_OPT*/\n"
+        )
+        bare = (
+            "/*\n"
+            " * Direct reclaim swappiness, exptct 0 - 60. Higher means more swappy and slower.\n"
+            " */\n"
+            "int direct_vm_swappiness = 60;\n"
+        )
+        if decl in text:
+            text = text.replace(decl, bare, 1)
+            print("kept direct_vm_swappiness")
+        elif "int direct_vm_swappiness = 60;" not in text:
+            raise SystemExit("direct_vm_swappiness declaration missing")
+        anchor = "#include <linux/debugfs.h>\n"
+        if "#include <linux/proc_fs.h>" not in text:
+            if anchor not in text:
+                raise SystemExit("debugfs include missing in mm/vmscan.c")
+            text = text.replace(anchor, anchor + "#include <linux/proc_fs.h>\n", 1)
+            print("included proc_fs.h")
+        vmscan.write_text(text)
+
+
 def main():
     missing = broken_symlinks()
     print(f"broken symlinks: {len(missing)}")
@@ -457,6 +555,7 @@ def main():
     strip_cr()
     disable_vendor_configs()
     apply_macro_suppression(macros)
+    patch_known_vendor_callers()
 
 
 if __name__ == "__main__":
