@@ -115,7 +115,6 @@ def main():
         stub_symlink(path)
     ensure_source_targets()
     strip_cr()
-    drop_unbalanced_ends()
     disable_vendor_configs()
 
 
