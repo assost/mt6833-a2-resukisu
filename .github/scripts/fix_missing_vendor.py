@@ -5,7 +5,10 @@ Commenting out source lines drops endif/endmenu that live in the missing
 file and makes the parent endmenu unexpected. Empty files keep the parse.
 """
 import os
+import re
 from pathlib import Path
+
+INCLUDE_RE = re.compile(r'#include\s*[<"]([^>"]+\.h)[>"]')
 
 ROOT = Path(".").resolve()
 
@@ -114,6 +117,30 @@ def write_sched_assist_headers():
             print(f"header {path.relative_to(ROOT).as_posix()}")
 
 
+def create_missing_headers():
+    created = 0
+    for path in list(ROOT.rglob("*")):
+        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix not in {".h", ".c", ".S"}:
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        for name in INCLUDE_RE.findall(text):
+            if name.startswith("asm/") or name.startswith("generated/"):
+                continue
+            dest = ROOT / "include" / name
+            if dest.exists() or dest.is_symlink():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("/* stub: header is not in this kernel drop */\n")
+            created += 1
+            print(f"created {dest.relative_to(ROOT).as_posix()}")
+    print(f"created headers: {created}")
+
+
 def neutralize_sched_assist_macro():
     needle = b"OPLUS_FEATURE_SCHED_ASSIST"
     for path in ROOT.rglob("*"):
@@ -161,6 +188,7 @@ def main():
         stub_symlink(path)
     ensure_source_targets()
     write_sched_assist_headers()
+    create_missing_headers()
     neutralize_sched_assist_macro()
     strip_cr()
     disable_vendor_configs()
