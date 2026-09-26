@@ -439,6 +439,62 @@ def apply_macro_suppression(macros):
         print(f"  undef {name}")
 
 
+def keep_walt_without_sched_assist():
+    """WALT demand fields were nested under the missing sched_assist macro."""
+    sched_user = ROOT / "include/linux/sched.h"
+    if sched_user.is_file():
+        text = sched_user.read_text()
+        pairs = (
+            (
+                "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n#define RAVG_HIST_SIZE_MAX 5\n",
+                "#ifdef CONFIG_SCHED_WALT\n#define RAVG_HIST_SIZE_MAX 5\n",
+            ),
+            (
+                "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n\tstruct ravg ravg;\n",
+                "#ifdef CONFIG_SCHED_WALT\n\tstruct ravg ravg;\n",
+            ),
+        )
+        for old, new in pairs:
+            if new in text:
+                continue
+            if old not in text:
+                raise SystemExit("walt ravg guard missing in include/linux/sched.h")
+            text = text.replace(old, new, 1)
+        sched_user.write_text(text)
+    sched = ROOT / "kernel/sched/sched.h"
+    if not sched.is_file():
+        return
+    text = sched.read_text()
+    old = (
+        "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n"
+        "extern unsigned int sysctl_sched_use_walt_cpu_util;\n"
+    )
+    new = "#ifdef CONFIG_SCHED_WALT\nextern unsigned int sysctl_sched_use_walt_cpu_util;\n"
+    if new not in text:
+        if old not in text:
+            raise SystemExit("walt externs missing in kernel/sched/sched.h")
+        text = text.replace(old, new, 1)
+    marker = "#endif /* __KERNEL_SCHED_H__ */\n"
+    stubs = (
+        "#ifndef OPLUS_FEATURE_SCHED_ASSIST\n"
+        "#define SA_SLIDE 0\n"
+        "#define SA_INPUT 0\n"
+        "#define SA_LAUNCHER_SI 0\n"
+        "#define SA_ANIM 0\n"
+        "static inline void sf_task_util_record(struct task_struct *p) { }\n"
+        "static inline int test_task_ux(struct task_struct *p) { return 0; }\n"
+        "static inline int sched_assist_scene(int scene) { return 0; }\n"
+        "static const int sysctl_sched_assist_enabled;\n"
+        "#endif\n\n"
+    )
+    if "static inline void sf_task_util_record" not in text:
+        if marker not in text:
+            raise SystemExit("sched.h footer missing")
+        text = text.replace(marker, stubs + marker, 1)
+    sched.write_text(text)
+    print("walt kept without sched_assist")
+
+
 def write_oplus_project_header():
     path = ROOT / "include/soc/oplus/system/oplus_project.h"
     if path.is_file() and path.stat().st_size > 200 and STUB_MARK not in path.read_text(errors="replace"):
@@ -580,6 +636,7 @@ def main():
     disable_vendor_configs()
     apply_macro_suppression(macros)
     patch_known_vendor_callers()
+    keep_walt_without_sched_assist()
     write_oplus_project_header()
 
 

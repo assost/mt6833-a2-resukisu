@@ -146,6 +146,30 @@ unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)
 """,
     )
     write(
+        work / "include/linux/sched.h",
+        """
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+#define RAVG_HIST_SIZE_MAX 5
+struct ravg { u32 demand; };
+#endif
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+	struct ravg ravg;
+#endif
+""",
+    )
+    write(
+        work / "kernel/sched/sched.h",
+        """
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+extern unsigned int sysctl_sched_use_walt_cpu_util;
+extern unsigned int sysctl_sched_use_walt_task_util;
+extern unsigned int walt_ravg_window;
+extern bool walt_disabled;
+#endif
+#endif /* __KERNEL_SCHED_H__ */
+""",
+    )
+    write(
         work / "mm/vmscan.c",
         """
 #include <linux/debugfs.h>
@@ -235,6 +259,19 @@ int direct_vm_swappiness = 60;
         raise SystemExit("direct_vm_swappiness declaration missing")
     if "#include <linux/proc_fs.h>" not in vmscan:
         raise SystemExit("proc_fs.h was not included")
+    user_sched = (work / "include/linux/sched.h").read_text(encoding="utf-8")
+    if "#ifdef CONFIG_SCHED_WALT\n#define RAVG_HIST_SIZE_MAX 5\n" not in user_sched:
+        raise SystemExit("ravg struct stayed behind sched_assist")
+    if "#ifdef CONFIG_SCHED_WALT\n\tstruct ravg ravg;\n" not in user_sched:
+        raise SystemExit("task ravg field stayed behind sched_assist")
+    kernel_sched = (work / "kernel/sched/sched.h").read_text(encoding="utf-8")
+    if "#ifdef CONFIG_SCHED_WALT\nextern unsigned int sysctl_sched_use_walt_cpu_util;\n" not in kernel_sched:
+        raise SystemExit("walt externs stayed behind sched_assist")
+    if "static inline void sf_task_util_record" not in kernel_sched:
+        raise SystemExit("fair.c assist stubs were not inserted")
+    adapt = SCRIPT.parent / "adapt.py"
+    if "#include <linux/cred.h>" not in adapt.read_text(encoding="utf-8"):
+        raise SystemExit("susfs uid helper cannot see current_uid")
     project = (work / "include/soc/oplus/system/oplus_project.h").read_text(encoding="utf-8")
     if "is_project" not in project or "get_project" not in project:
         raise SystemExit("oplus project stub is missing the callers used by fair.c")

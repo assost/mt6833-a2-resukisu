@@ -179,6 +179,7 @@ dispatch.write_text(text)
 header = ROOT / "include/linux/susfs_def.h"
 extra = """
 #include <linux/sched.h>
+#include <linux/cred.h>
 #include <linux/types.h>
 
 void susfs_set_hide_sus_mnts_for_non_su_procs(void __user **user_info);
