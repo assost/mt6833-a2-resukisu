@@ -662,6 +662,7 @@ def write_oppo_process_header():
 struct pid;
 struct task_struct;
 static inline bool oppo_is_android_core_group(struct pid *pgrp) {{ return false; }}
+static inline bool is_critial_process(struct task_struct *tsk) {{ return false; }}
 static inline void oplus_boost_kill_signal(int sig, struct task_struct *caller, struct task_struct *target) {{}}
 #endif
 """,

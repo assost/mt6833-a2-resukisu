@@ -342,7 +342,7 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if proto not in opened.split("#if", 1)[0] and proto not in opened.split("#endif", 1)[-1]:
         raise SystemExit("faccessat prototype was hidden inside an ifdef")
     process = (work / "include/soc/oplus/system/oppo_process.h").read_text(encoding="utf-8")
-    if "oppo_is_android_core_group" not in process:
+    if "oppo_is_android_core_group" not in process or "is_critial_process" not in process:
         raise SystemExit("oppo_process stub missing")
     print("vendor macro suppression ok")
 
