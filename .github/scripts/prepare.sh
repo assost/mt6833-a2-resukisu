@@ -14,8 +14,8 @@ cp -a "${ROOT}/.github/scripts/susfs_api_compat.c" fs/susfs_api_compat.c
 git apply --whitespace=nowarn "${ROOT}/.github/scripts/a2-susfs.patch"
 
 python3 "${ROOT}/.github/scripts/adapt.py"
-python3 "${ROOT}/.github/scripts/fix_missing_vendor.py"
 python3 "${ROOT}/.github/scripts/port_susfs_full.py"
+python3 "${ROOT}/.github/scripts/fix_missing_vendor.py"
 
 if ! grep -q 'susfs_api_compat.o' fs/Makefile; then
   sed -i 's/obj-$(CONFIG_KSU_SUSFS) += susfs.o/obj-$(CONFIG_KSU_SUSFS) += susfs.o susfs_api_compat.o/' fs/Makefile

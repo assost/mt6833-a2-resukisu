@@ -41,11 +41,11 @@ must_replace(
     """	if (file) {
 		struct inode *inode = file_inode(vma->vm_file);""",
     """	if (file) {
+		struct inode *inode = file_inode(vma->vm_file);
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-		if (SUSFS_IS_INODE_SUS_MAP(file_inode(file)))
+		if (SUSFS_IS_INODE_SUS_MAP(inode))
 			return;
-#endif
-		struct inode *inode = file_inode(vma->vm_file);""",
+#endif""",
 )
 
 must_replace(
