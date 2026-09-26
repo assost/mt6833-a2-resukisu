@@ -129,7 +129,7 @@ def create_missing_headers():
         except OSError:
             continue
         for name in INCLUDE_RE.findall(text):
-            if name.startswith("asm/") or name.startswith("generated/"):
+            if ".." in name or not (name.startswith("linux/") or name.startswith("soc/")):
                 continue
             dest = ROOT / "include" / name
             if dest.exists() or dest.is_symlink():
