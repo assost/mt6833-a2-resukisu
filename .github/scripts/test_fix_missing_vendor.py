@@ -155,11 +155,20 @@ struct ravg { u32 demand; };
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
 	struct ravg ravg;
 #endif
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+enum task_event {
+	TASK_WAKE = 2,
+	IRQ_UPDATE = 5,
+};
+#endif
 """,
     )
     write(
         work / "kernel/sched/sched.h",
         """
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+	u64 window_start;
+#endif
 #if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
 extern unsigned int sysctl_sched_use_walt_cpu_util;
 extern unsigned int sysctl_sched_use_walt_task_util;
@@ -167,6 +176,14 @@ extern unsigned int walt_ravg_window;
 extern bool walt_disabled;
 #endif
 #endif /* __KERNEL_SCHED_H__ */
+""",
+    )
+    write(
+        work / "include/trace/events/sched.h",
+        """
+#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)
+extern unsigned int walt_ravg_window;
+#endif
 """,
     )
     write(
@@ -275,7 +292,14 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
         raise SystemExit("ravg struct stayed behind sched_assist")
     if "#ifdef CONFIG_SCHED_WALT\n\tstruct ravg ravg;\n" not in user_sched:
         raise SystemExit("task ravg field stayed behind sched_assist")
+    if "#ifdef CONFIG_SCHED_WALT\nenum task_event {\n" not in user_sched:
+        raise SystemExit("walt task_event stayed behind sched_assist")
+    trace = (work / "include/trace/events/sched.h").read_text(encoding="utf-8")
+    if "#ifdef CONFIG_SCHED_WALT\nextern unsigned int walt_ravg_window;\n" not in trace:
+        raise SystemExit("walt trace events stayed behind sched_assist")
     kernel_sched = (work / "kernel/sched/sched.h").read_text(encoding="utf-8")
+    if "#ifdef CONFIG_SCHED_WALT\n\tu64 window_start;\n" not in kernel_sched:
+        raise SystemExit("rq window_start stayed behind sched_assist")
     if "#ifdef CONFIG_SCHED_WALT\nextern unsigned int sysctl_sched_use_walt_cpu_util;\n" not in kernel_sched:
         raise SystemExit("walt externs stayed behind sched_assist")
     if "static inline void sf_task_util_record" not in kernel_sched:

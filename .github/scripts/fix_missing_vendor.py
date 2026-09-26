@@ -453,6 +453,10 @@ def keep_walt_without_sched_assist():
                 "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n\tstruct ravg ravg;\n",
                 "#ifdef CONFIG_SCHED_WALT\n\tstruct ravg ravg;\n",
             ),
+            (
+                "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\nenum task_event {\n",
+                "#ifdef CONFIG_SCHED_WALT\nenum task_event {\n",
+            ),
         )
         for old, new in pairs:
             if new in text:
@@ -465,6 +469,15 @@ def keep_walt_without_sched_assist():
     if not sched.is_file():
         return
     text = sched.read_text()
+    window = (
+        "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n"
+        "\tu64 window_start;\n"
+    )
+    window_new = "#ifdef CONFIG_SCHED_WALT\n\tu64 window_start;\n"
+    if window_new not in text:
+        if window not in text:
+            raise SystemExit("rq window_start guard missing")
+        text = text.replace(window, window_new, 1)
     old = (
         "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n"
         "extern unsigned int sysctl_sched_use_walt_cpu_util;\n"
@@ -493,6 +506,18 @@ def keep_walt_without_sched_assist():
             raise SystemExit("sched.h footer missing")
         text = text.replace(marker, stubs + marker, 1)
     sched.write_text(text)
+    trace = ROOT / "include/trace/events/sched.h"
+    if trace.is_file():
+        body = trace.read_text()
+        old_trace = (
+            "#if defined(OPLUS_FEATURE_SCHED_ASSIST) && defined(CONFIG_SCHED_WALT)\n"
+            "extern unsigned int walt_ravg_window;\n"
+        )
+        new_trace = "#ifdef CONFIG_SCHED_WALT\nextern unsigned int walt_ravg_window;\n"
+        if new_trace not in body:
+            if old_trace not in body:
+                raise SystemExit("walt trace guard missing")
+            trace.write_text(body.replace(old_trace, new_trace, 1))
     print("walt kept without sched_assist")
 
 
