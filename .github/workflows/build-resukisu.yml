@@ -42,22 +42,12 @@ jobs:
       - name: clang-r433403b
         run: |
           set -eux
-          mkdir -p "$GITHUB_WORKSPACE/clang"
-          urls=(
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r433403b.tar.gz"
-            "https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r433403b.tar.gz"
-          )
-          ok=0
-          for url in "${urls[@]}"; do
-            if curl -L --fail --retry 3 -o /tmp/clang.tar.gz "$url"; then
-              ok=1
-              break
-            fi
-          done
-          test "$ok" = 1
-          tar -C "$GITHUB_WORKSPACE/clang" -xzf /tmp/clang.tar.gz
-          rm -f /tmp/clang.tar.gz
+          git clone --depth 1 --branch 12 \
+            https://github.com/AOSP-12/prebuilts_clang_host_linux-x86_clang-r433403b.git \
+            "$GITHUB_WORKSPACE/clang"
           test -x "$GITHUB_WORKSPACE/clang/bin/clang"
+          test -x "$GITHUB_WORKSPACE/clang/bin/ld.lld"
+          "$GITHUB_WORKSPACE/clang/bin/clang" --version
           df -h
 
       - name: Integrate ReSukiSU and SUSFS
