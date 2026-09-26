@@ -531,6 +531,10 @@ def write_oplus_project_header():
 #ifndef _OPLUS_PROJECT_STUB_H_
 #define _OPLUS_PROJECT_STUB_H_
 #include <linux/types.h>
+enum {{
+	RELEASE_VERSION = 0,
+	AGING = 1,
+}};
 static inline unsigned int get_project(void) {{ return 0; }}
 static inline unsigned int is_project(int project) {{ return 0; }}
 static inline unsigned int get_PCB_Version(void) {{ return 0; }}
@@ -543,6 +547,24 @@ static inline bool oplus_daily_build(void) {{ return false; }}
         encoding="utf-8",
     )
     print("stub include/soc/oplus/system/oplus_project.h")
+
+
+def write_healthinfo_ion_header():
+    path = ROOT / "include/linux/healthinfo/ion.h"
+    if path.is_file() and STUB_MARK not in path.read_text(errors="replace"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""/* {STUB_MARK} */
+#ifndef _HEALTHINFO_ION_STUB_H_
+#define _HEALTHINFO_ION_STUB_H_
+#include <linux/types.h>
+static inline unsigned long ion_total(void) {{ return 0; }}
+#endif
+""",
+        encoding="utf-8",
+    )
+    print("stub include/linux/healthinfo/ion.h")
 
 
 def patch_known_vendor_callers():
@@ -689,6 +711,7 @@ def main():
     patch_known_vendor_callers()
     keep_walt_without_sched_assist()
     write_oplus_project_header()
+    write_healthinfo_ion_header()
 
 
 if __name__ == "__main__":

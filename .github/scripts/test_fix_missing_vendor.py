@@ -313,8 +313,11 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if "#include <linux/cred.h>" not in adapt.read_text(encoding="utf-8"):
         raise SystemExit("susfs uid helper cannot see current_uid")
     project = (work / "include/soc/oplus/system/oplus_project.h").read_text(encoding="utf-8")
-    if "is_project" not in project or "get_project" not in project:
+    if "is_project" not in project or "get_project" not in project or "AGING" not in project:
         raise SystemExit("oplus project stub is missing the callers used by fair.c")
+    ion = (work / "include/linux/healthinfo/ion.h").read_text(encoding="utf-8")
+    if "ion_total" not in ion:
+        raise SystemExit("healthinfo ion stub missing")
     print("vendor macro suppression ok")
 
 
