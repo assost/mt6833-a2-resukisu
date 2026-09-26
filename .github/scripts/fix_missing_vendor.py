@@ -35,11 +35,11 @@ def stub_symlink(path: Path):
     name = path.name
     path.unlink()
     if name.endswith((".c", ".h", ".S")):
-        path.write_text("/* stub: vendor source is not in this kernel drop */\n")
+        path.write_text(f"/* {STUB_MARK} */\n")
         return
     path.mkdir()
     (path / "Makefile").write_text("\n")
-    (path / "Kconfig").write_text("# stub: vendor source is not in this kernel drop\n")
+    (path / "Kconfig").write_text(f"# {STUB_MARK}\n")
 
 
 def ensure_source_targets():
@@ -62,7 +62,7 @@ def ensure_source_targets():
             if target.is_symlink():
                 target.unlink()
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("# stub: vendor source is not in this kernel drop\n")
+            target.write_text(f"# {STUB_MARK}\n")
             print(f"stub source {quoted}")
 
 
@@ -105,6 +105,49 @@ def drop_unbalanced_ends():
             print(f"balanced {path.relative_to(ROOT)}")
 
 
+STUB_MARK = "stub: vendor source is not in this kernel drop"
+BASELINE_SUPPRESS = (
+    "OPLUS_FEATURE_PHOENIX",
+    "OPLUS_FEATURE_SCHED_ASSIST",
+)
+# These wrap large amounts of in-tree code. Undefining them to skip one
+# missing vendor include drops the rest of that code too.
+BROAD_MACROS = {
+    "OPLUS_BUG_STABILITY",
+    "OPLUS_BUG_COMPATIBILITY",
+    "OPLUS_BUG_DEBUG",
+    "OPLUS_BUG_UPDATABILITY",
+    "OPLUS_ARCH_INJECT",
+    "OPLUS_ARCH_EXTENDS",
+    "OPLUS_FEATURE_PLATFORM",
+    "OPLUS_FEATURE_PLATFORM_MTK",
+}
+VENDOR_PATH_BITS = (
+    "oplus",
+    "sched_assist",
+    "klockopt",
+    "healthinfo",
+    "iomonitor",
+    "phoenix",
+    "jankinfo",
+    "memleak",
+    "keventupload",
+)
+SECURE_IFEQS = (
+    "OPLUS_FEATURE_SECURE_GUARD",
+    "OPLUS_FEATURE_SECURE_ROOTGUARD",
+    "OPLUS_FEATURE_SECURE_MOUNTGUARD",
+    "OPLUS_FEATURE_SECURE_EXECGUARD",
+    "OPLUS_FEATURE_SECURE_KEVENTUPLOAD",
+)
+COND_RE = re.compile(r"^[ \t]*#[ \t]*(ifdef|ifndef|if|elif|else|endif)\b(.*)$")
+INCLUDE_LINE = re.compile(r"^[ \t]*#[ \t]*include\s*([<\"])([^>\"]+)[>\"].*$")
+OPLUS_DEFINED = re.compile(r"defined\s*\(\s*(OPLUS_[A-Z0-9_]+)\s*\)")
+FOREACH_PLAIN = "$(foreach myfeature,$(ALLOWED_MCROS),"
+FOREACH_FILTERED = re.compile(
+    r"\$\(foreach myfeature,\$\(filter-out .*?,\$\(ALLOWED_MCROS\)\),"
+)
+
 SCHED_ASSIST_HEADERS = (
     "sched_assist_mutex.h",
     "sched_assist_status.h",
@@ -122,7 +165,7 @@ def write_sched_assist_headers():
     for name in SCHED_ASSIST_HEADERS:
         path = directory / name
         if not path.exists():
-            path.write_text("/* stub: vendor sched_assist header is not in this kernel drop */\n")
+            path.write_text(f"/* {STUB_MARK} */\n")
             print(f"header {path.relative_to(ROOT).as_posix()}")
 
 
@@ -214,6 +257,188 @@ def allow_vdso_text_relocs():
     print("vdso: allow lld text relocations")
 
 
+def _push_condition(stack, kind, rest):
+    if kind == "ifdef":
+        name = rest.strip().split()[0] if rest.strip() else ""
+        stack.append({name} if name.startswith("OPLUS_") else set())
+    elif kind == "ifndef":
+        stack.append(set())
+    elif kind == "if":
+        stack.append(set(OPLUS_DEFINED.findall(rest)))
+    elif kind == "elif":
+        if stack:
+            stack.pop()
+        stack.append(set(OPLUS_DEFINED.findall(rest)))
+    elif kind == "else":
+        if stack:
+            stack[-1] = set()
+    elif kind == "endif" and stack:
+        stack.pop()
+
+
+def _generated_include(spec):
+    return (
+        spec.startswith("generated/")
+        or "/generated/" in spec
+        or spec.endswith("autoconf.h")
+        or spec.endswith("compile.h")
+    )
+
+
+def _include_candidates(src, spec, quote):
+    candidates = []
+    if quote == '"':
+        candidates.append(src.parent / spec)
+    for base in (
+        "include",
+        "arch/arm64/include",
+        "arch/arm64/include/uapi",
+        "include/uapi",
+        "drivers/misc/mediatek/include",
+    ):
+        candidates.append(ROOT / base / spec)
+    return candidates
+
+
+def _under_marked_stub(path):
+    current = path if path.is_dir() else path.parent
+    root = ROOT.resolve()
+    while True:
+        try:
+            current.resolve().relative_to(root)
+        except (OSError, ValueError):
+            return False
+        if current.resolve() == root:
+            return False
+        kconfig = current / "Kconfig"
+        try:
+            if kconfig.is_file() and kconfig.stat().st_size < 200:
+                if STUB_MARK in kconfig.read_text(errors="replace"):
+                    return True
+        except OSError:
+            return False
+        parent = current.parent
+        if parent == current:
+            return False
+        current = parent
+
+
+def _is_stub_file(path):
+    try:
+        if path.is_file() and path.stat().st_size < 200:
+            return STUB_MARK in path.read_text(errors="replace")
+    except OSError:
+        return False
+    return False
+
+
+def _vendor_missing_include(src, spec, quote):
+    if _generated_include(spec):
+        return False
+    candidates = _include_candidates(src, spec, quote)
+    existing = [cand for cand in candidates if cand.is_file()]
+    if existing:
+        hit = existing[0]
+        return _is_stub_file(hit) or _under_marked_stub(hit)
+    if any(_under_marked_stub(cand) for cand in candidates):
+        return True
+    lowered = spec.lower()
+    return any(bit in lowered for bit in VENDOR_PATH_BITS)
+
+
+def _innermost_feature(stack):
+    for frame in reversed(stack):
+        specific = {name for name in frame if name not in BROAD_MACROS}
+        if specific:
+            return specific
+    return set()
+
+
+def find_vendor_guard_macros():
+    found = set()
+    reported = 0
+    for path in ROOT.rglob("*"):
+        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix not in {".h", ".c", ".S"}:
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        stack = []
+        for line in text.splitlines():
+            cond = COND_RE.match(line)
+            if cond:
+                _push_condition(stack, cond.group(1), cond.group(2))
+                continue
+            include = INCLUDE_LINE.match(line)
+            if not include:
+                continue
+            quote, spec = include.group(1), include.group(2)
+            if not _vendor_missing_include(path, spec, quote):
+                continue
+            macros = _innermost_feature(stack)
+            if macros:
+                found.update(macros)
+                continue
+            if reported < 40:
+                print(f"vendor include kept: {path.relative_to(ROOT).as_posix()} -> {spec}")
+                reported += 1
+    return found
+
+
+def apply_macro_suppression(macros):
+    macros = set(macros) | set(BASELINE_SUPPRESS)
+    names = " ".join(sorted(macros))
+    env = ROOT / "OplusKernelEnvConfig.mk"
+    if env.is_file():
+        text = env.read_text()
+        replacement = f"$(foreach myfeature,$(filter-out {names},$(ALLOWED_MCROS)),"
+        if FOREACH_PLAIN in text:
+            text = text.replace(FOREACH_PLAIN, replacement, 1)
+        else:
+            updated, count = FOREACH_FILTERED.subn(replacement, text, count=1)
+            if count != 1:
+                raise SystemExit("ALLOWED_MCROS foreach not found")
+            text = updated
+        for name in SECURE_IFEQS:
+            text = text.replace(
+                f"ifeq ($({name}),yes)",
+                f"ifeq ($({name}),no)",
+            )
+        env.write_text(text)
+    else:
+        print("OplusKernelEnvConfig.mk missing")
+    makefile = ROOT / "Makefile"
+    body = makefile.read_text()
+    if not body.endswith("\n"):
+        body += "\n"
+    extra = []
+    for name in sorted(macros):
+        for var in ("KBUILD_CFLAGS", "KBUILD_CPPFLAGS", "CFLAGS_KERNEL", "CFLAGS_MODULE"):
+            line = f"{var} += -U{name}\n"
+            if line not in body:
+                extra.append(line)
+    if extra:
+        makefile.write_text(body + "".join(extra))
+    defconfig = ROOT / "arch/arm64/configs/k6833v1_64_k419_defconfig"
+    if defconfig.is_file():
+        config = defconfig.read_text()
+        for name in sorted(macros):
+            symbol = "CONFIG_" + name
+            config = re.sub(
+                rf"^{re.escape(symbol)}=[ym]$",
+                f"# {symbol} is not set",
+                config,
+                flags=re.M,
+            )
+        defconfig.write_text(config)
+    print(f"suppressed vendor macros: {len(macros)}")
+    for name in sorted(macros):
+        print(f"  undef {name}")
+
+
 def main():
     missing = broken_symlinks()
     print(f"broken symlinks: {len(missing)}")
@@ -221,6 +446,7 @@ def main():
         print(f"  stub {path.relative_to(ROOT).as_posix()}")
         stub_symlink(path)
     ensure_source_targets()
+    macros = find_vendor_guard_macros()
     write_sched_assist_headers()
     version = ROOT / "include/linux/version.h"
     if not version.exists():
@@ -230,6 +456,7 @@ def main():
     allow_vdso_text_relocs()
     strip_cr()
     disable_vendor_configs()
+    apply_macro_suppression(macros)
 
 
 if __name__ == "__main__":

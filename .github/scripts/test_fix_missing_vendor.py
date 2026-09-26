@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Run fix_missing_vendor.py on a fixture and check vendor macros are undefined."""
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent / "fix_missing_vendor.py"
+STUB = "stub: vendor source is not in this kernel drop"
+
+
+def write(path: Path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def main():
+    work = Path(sys.argv[1])
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    real_mk = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+    if real_mk is not None:
+        write(work / "OplusKernelEnvConfig.mk", real_mk.read_text(encoding="utf-8"))
+    else:
+        write(
+            work / "OplusKernelEnvConfig.mk",
+            """
+ALLOWED_MCROS := OPLUS_FEATURE_PHOENIX \\
+OPLUS_FEATURE_SCHED_ASSIST \\
+OPLUS_FEATURE_SENSOR \\
+OPLUS_BUG_STABILITY
+
+$(foreach myfeature,$(ALLOWED_MCROS),\\
+         $(eval KBUILD_CFLAGS += -D$(myfeature)) \\
+)
+
+ifeq ($(OPLUS_FEATURE_SECURE_GUARD),yes)
+KBUILD_CFLAGS += -DCONFIG_OPLUS_SECURE_GUARD
+endif
+ifeq ($(OPLUS_FEATURE_SECURE_ROOTGUARD),yes)
+export CONFIG_OPLUS_ROOT_CHECK=y
+endif
+ifeq ($(OPLUS_FEATURE_SECURE_MOUNTGUARD),yes)
+KBUILD_CFLAGS += -DCONFIG_OPLUS_MOUNT_BLOCK
+endif
+ifeq ($(OPLUS_FEATURE_SECURE_EXECGUARD),yes)
+KBUILD_CFLAGS += -DCONFIG_OPLUS_EXECVE_BLOCK
+endif
+ifeq ($(OPLUS_FEATURE_SECURE_KEVENTUPLOAD),yes)
+KBUILD_CFLAGS += -DCONFIG_OPLUS_KEVENT_UPLOAD
+endif
+""",
+        )
+    write(work / "Makefile", "KBUILD_CFLAGS += -Wall\n")
+    write(
+        work / "arch/arm64/configs/k6833v1_64_k419_defconfig",
+        "\n".join(
+            [
+                "CONFIG_LTO_CLANG=y",
+                "CONFIG_CFI_CLANG=y",
+                "CONFIG_OPLUS_FEATURE_SCHED_ASSIST=y",
+                "CONFIG_OPLUS_FEATURE_PHOENIX=y",
+                "CONFIG_OPLUS_FEATURE_SENSOR=y",
+                "CONFIG_LOCKING_PROTECT=y",
+                "CONFIG_KERNEL_LOCK_OPT=y",
+                "CONFIG_OPLUS_LOCKING_STRATEGY=y",
+                "",
+            ]
+        ),
+    )
+    write(
+        work / "arch/arm64/kernel/vdso/Makefile",
+        "ldflags-y := --build-id -n -T\n",
+    )
+    write(
+        work / "init/main.c",
+        """
+#ifdef OPLUS_FEATURE_PHOENIX
+#include "../drivers/soc/oplus/system/oplus_phoenix/oplus_phoenix.h"
+#endif
+#ifdef OPLUS_BUG_STABILITY
+#include "../drivers/soc/oplus/system/oplus_broad.h"
+#endif
+""",
+    )
+    write(
+        work / "include/linux/mutex.h",
+        """
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+#include <linux/sched_assist/sched_assist_mutex.h>
+#endif
+#ifdef OPLUS_FEATURE_SENSOR
+#include <linux/existing.h>
+#endif
+""",
+    )
+    write(work / "include/linux/existing.h", "/* in-tree header */\n")
+    write(
+        work / "include/linux/sched_assist/Kconfig",
+        f"# {STUB}\n",
+    )
+    write(
+        work / "include/linux/sched_assist/sched_assist_mutex.h",
+        f"/* {STUB} */\n",
+    )
+    write(work / "drivers/soc/oplus/system/Kconfig", f"# {STUB}\n")
+    write(
+        work / "include/uapi/linux/posix_types.h",
+        "typedef struct { unsigned long fds_bits[1]; } __kernel_fd_set;\n",
+    )
+    write(
+        work / "include/linux/shadow_check.c",
+        "#include <linux/posix_types.h>\n#include <generated/autoconf.h>\n",
+    )
+    write(
+        work / "init/extra.c",
+        "#include <linux/not_a_vendor_header.h>\n",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        cwd=work,
+        text=True,
+        capture_output=True,
+    )
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        raise SystemExit(proc.returncode)
+
+    makefile = (work / "Makefile").read_text(encoding="utf-8")
+    env = (work / "OplusKernelEnvConfig.mk").read_text(encoding="utf-8")
+    defconfig = (work / "arch/arm64/configs/k6833v1_64_k419_defconfig").read_text(
+        encoding="utf-8"
+    )
+    version = (work / "include/linux/version.h").read_text(encoding="utf-8")
+    required = [
+        "CFLAGS_KERNEL += -UOPLUS_FEATURE_PHOENIX\n",
+        "CFLAGS_MODULE += -UOPLUS_FEATURE_PHOENIX\n",
+        "KBUILD_CPPFLAGS += -UOPLUS_FEATURE_PHOENIX\n",
+        "CFLAGS_KERNEL += -UOPLUS_FEATURE_SCHED_ASSIST\n",
+    ]
+    for line in required:
+        if line not in makefile:
+            raise SystemExit(f"missing flag {line.strip()}")
+    for banned in ("-UOPLUS_BUG_STABILITY", "-UOPLUS_FEATURE_SENSOR"):
+        if banned in makefile:
+            raise SystemExit(f"broad or in-tree macro was undefined: {banned}")
+    if "filter-out" not in env or "OPLUS_FEATURE_PHOENIX" not in env.split("filter-out", 1)[1].split(")", 1)[0]:
+        raise SystemExit("PHOENIX was not filtered out of ALLOWED_MCROS")
+    if "OPLUS_FEATURE_SCHED_ASSIST" not in env.split("filter-out", 1)[1].split(")", 1)[0]:
+        raise SystemExit("SCHED_ASSIST was not filtered out of ALLOWED_MCROS")
+    if "OPLUS_BUG_STABILITY" in env.split("filter-out", 1)[1].split(")", 1)[0]:
+        raise SystemExit("BUG_STABILITY was filtered out")
+    for name in (
+        "OPLUS_FEATURE_SECURE_GUARD",
+        "OPLUS_FEATURE_SECURE_ROOTGUARD",
+        "OPLUS_FEATURE_SECURE_MOUNTGUARD",
+        "OPLUS_FEATURE_SECURE_EXECGUARD",
+        "OPLUS_FEATURE_SECURE_KEVENTUPLOAD",
+    ):
+        if f"ifeq ($({name}),yes)" in env:
+            raise SystemExit(f"{name} is still forced on")
+        if f"ifeq ($({name}),no)" not in env:
+            raise SystemExit(f"{name} ifeq missing")
+    if "CONFIG_LTO_CLANG=y" not in defconfig or "CONFIG_CFI_CLANG=y" not in defconfig:
+        raise SystemExit("LTO or CFI was dropped")
+    if "CONFIG_OPLUS_FEATURE_PHOENIX=y" in defconfig:
+        raise SystemExit("PHOENIX config stayed enabled")
+    if "CONFIG_OPLUS_FEATURE_SENSOR=y" not in defconfig:
+        raise SystemExit("in-tree SENSOR config was disabled")
+    if version.strip() != "#include <generated/uapi/linux/version.h>":
+        raise SystemExit(f"version.h is {version!r}")
+    if (work / "include/linux/posix_types.h").exists():
+        raise SystemExit("posix_types.h shadowed the uapi header")
+    if (work / "include/linux/not_a_vendor_header.h").exists():
+        raise SystemExit("created an unrelated header stub")
+    vdso = (work / "arch/arm64/kernel/vdso/Makefile").read_text(encoding="utf-8")
+    if "-z notext" not in vdso:
+        raise SystemExit("vdso linker flag was not updated")
+    if "suppressed vendor macros: 2" not in proc.stdout:
+        raise SystemExit("expected exactly the two baseline vendor macros")
+    if "vendor include kept:" not in proc.stdout:
+        raise SystemExit("broad-guarded vendor include was not reported")
+    print("vendor macro suppression ok")
+
+
+if __name__ == "__main__":
+    main()
