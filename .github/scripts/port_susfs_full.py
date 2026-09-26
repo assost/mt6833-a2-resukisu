@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Insert sus_map skips and AVC tcontext spoofing into the A2 4.19 tree."""
+from pathlib import Path
+
+ROOT = Path(".").resolve()
+
+
+def must_replace(rel, old, new):
+    path = ROOT / rel
+    text = path.read_text()
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit(f"anchor missing in {rel}")
+    path.write_text(text.replace(old, new, 1))
+
+
+header = ROOT / "include/linux/susfs_def.h"
+body = header.read_text()
+if "AS_FLAGS_SUS_MAP" not in body:
+    body = body.replace(
+        "#endif // #ifndef KSU_SUSFS_DEF_H",
+        """
+#include <linux/bitops.h>
+#define AS_FLAGS_SUS_MAP 39
+struct st_susfs_sus_map {
+	char target_pathname[SUSFS_MAX_LEN_PATHNAME];
+	int err;
+};
+#define SUSFS_IS_INODE_SUS_MAP(inode) \\
+	((inode) && (inode)->i_mapping && \\
+	 test_bit(AS_FLAGS_SUS_MAP, &(inode)->i_mapping->flags) && \\
+	 susfs_is_current_proc_umounted_app())
+#endif // #ifndef KSU_SUSFS_DEF_H
+""",
+    )
+    header.write_text(body)
+
+must_replace(
+    "fs/proc/task_mmu.c",
+    """	if (file) {
+		struct inode *inode = file_inode(vma->vm_file);""",
+    """	if (file) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (SUSFS_IS_INODE_SUS_MAP(file_inode(file)))
+			return;
+#endif
+		struct inode *inode = file_inode(vma->vm_file);""",
+)
+
+must_replace(
+    "fs/proc/task_mmu.c",
+    """static int show_smap(struct seq_file *m, void *v)
+{
+	struct vm_area_struct *vma = v;
+	struct mem_size_stats mss;
+
+	memset(&mss, 0, sizeof(mss));""",
+    """static int show_smap(struct seq_file *m, void *v)
+{
+	struct vm_area_struct *vma = v;
+	struct mem_size_stats mss;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+	if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+		return 0;
+#endif
+	memset(&mss, 0, sizeof(mss));""",
+)
+
+must_replace(
+    "fs/proc/task_mmu.c",
+    """	for (vma = priv->mm->mmap; vma;) {
+		smap_gather_stats(vma, &mss);""",
+    """	for (vma = priv->mm->mmap; vma;) {
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		if (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
+			vma = vma->vm_next;
+			continue;
+		}
+#endif
+		smap_gather_stats(vma, &mss);""",
+)
+
+must_replace(
+    "fs/proc/task_mmu.c",
+    """		ret = down_read_killable(&mm->mmap_sem);
+		if (ret)
+			goto out_free;
+		ret = walk_page_range(start_vaddr, end, &pagemap_walk);""",
+    """		ret = down_read_killable(&mm->mmap_sem);
+		if (ret)
+			goto out_free;
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		{
+			struct vm_area_struct *map_vma = find_vma(mm, start_vaddr);
+
+			if (map_vma && map_vma->vm_start <= start_vaddr &&
+			    map_vma->vm_file &&
+			    SUSFS_IS_INODE_SUS_MAP(file_inode(map_vma->vm_file))) {
+				up_read(&mm->mmap_sem);
+				start_vaddr = map_vma->vm_end;
+				continue;
+			}
+		}
+#endif
+		ret = walk_page_range(start_vaddr, end, &pagemap_walk);""",
+)
+
+must_replace(
+    "mm/memory.c",
+    """	/* ignore errors, just check how much was successfully transferred */
+	while (len) {
+		int bytes, ret, offset;
+		void *maddr;
+		struct page *page = NULL;
+
+		ret = get_user_pages_remote(tsk, mm, addr, 1,""",
+    """	/* ignore errors, just check how much was successfully transferred */
+	while (len) {
+		int bytes, ret, offset;
+		void *maddr;
+		struct page *page = NULL;
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		vma = find_vma(mm, addr);
+		if (vma && vma->vm_start <= addr && vma->vm_file &&
+		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+			break;
+#endif
+		ret = get_user_pages_remote(tsk, mm, addr, 1,""",
+)
+
+mem = (ROOT / "mm/memory.c").read_text()
+if "linux/susfs_def.h" not in mem:
+    mem = mem.replace(
+        "#include <linux/ptrace.h>\n",
+        """#include <linux/ptrace.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+#include <linux/susfs_def.h>
+#endif
+""",
+        1,
+    )
+    (ROOT / "mm/memory.c").write_text(mem)
+
+must_replace(
+    "security/selinux/avc.c",
+    """	rc = security_sid_to_context(state, tsid, &scontext, &scontext_len);
+	if (rc)
+		audit_log_format(ab, " tsid=%d", tsid);
+	else {
+		audit_log_format(ab, " tcontext=%s", scontext);
+		kfree(scontext);
+	}""",
+    """	rc = security_sid_to_context(state, tsid, &scontext, &scontext_len);
+#ifdef CONFIG_KSU_SUSFS
+	if (static_branch_unlikely(&susfs_is_avc_log_spoofing_enabled) &&
+	    tsid == susfs_ksu_sid) {
+		if (rc)
+			audit_log_format(ab, " tsid=%d", susfs_priv_app_sid);
+		else {
+			audit_log_format(ab, " tcontext=%s",
+					 "u:r:priv_app:s0:c512,c768");
+			kfree(scontext);
+		}
+	} else
+#endif
+	if (rc)
+		audit_log_format(ab, " tsid=%d", tsid);
+	else {
+		audit_log_format(ab, " tcontext=%s", scontext);
+		kfree(scontext);
+	}""",
+)
+
+avc = (ROOT / "security/selinux/avc.c").read_text()
+if "susfs_is_avc_log_spoofing_enabled" not in avc.split("avc_dump_query", 1)[0]:
+    needle = "#include <linux/audit.h>\n"
+    insert = needle + """#ifdef CONFIG_KSU_SUSFS
+#include <linux/static_key.h>
+extern u32 susfs_ksu_sid;
+extern u32 susfs_priv_app_sid;
+extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
+#endif
+"""
+    if needle not in avc:
+        first = avc.find("#include ")
+        if first < 0:
+            raise SystemExit("no include in security/selinux/avc.c")
+        line_end = avc.find("\n", first)
+        avc = avc[: line_end + 1] + insert[len(needle):] + avc[line_end + 1 :]
+    else:
+        avc = avc.replace(needle, insert, 1)
+    (ROOT / "security/selinux/avc.c").write_text(avc)
+
+print("port_susfs_full.py done")
