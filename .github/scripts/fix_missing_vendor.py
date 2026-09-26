@@ -151,7 +151,8 @@ def create_missing_headers():
             if ".." in name or not (name.startswith("linux/") or name.startswith("soc/")):
                 continue
             dest = ROOT / "include" / name
-            if dest.exists() or dest.is_symlink():
+            uapi = ROOT / "include" / "uapi" / name
+            if dest.exists() or dest.is_symlink() or uapi.exists():
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text("/* stub: header is not in this kernel drop */\n")
@@ -207,7 +208,6 @@ def main():
         stub_symlink(path)
     ensure_source_targets()
     write_sched_assist_headers()
-    restore_standard_headers()
     create_missing_headers()
     neutralize_sched_assist_macro()
     strip_cr()
