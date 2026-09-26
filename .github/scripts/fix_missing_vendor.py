@@ -94,6 +94,47 @@ def drop_unbalanced_ends():
             print(f"balanced {path.relative_to(ROOT)}")
 
 
+SCHED_ASSIST_HEADERS = (
+    "sched_assist_mutex.h",
+    "sched_assist_status.h",
+    "sched_assist_common.h",
+    "sched_assist_slide.h",
+    "sched_assist_locking.h",
+)
+
+
+def write_sched_assist_headers():
+    directory = ROOT / "include/linux/sched_assist"
+    if not directory.is_dir():
+        return
+    for name in SCHED_ASSIST_HEADERS:
+        path = directory / name
+        if not path.exists():
+            path.write_text("/* stub: vendor sched_assist header is not in this kernel drop */\n")
+            print(f"header {path.relative_to(ROOT).as_posix()}")
+
+
+def neutralize_sched_assist_macro():
+    needle = b"OPLUS_FEATURE_SCHED_ASSIST"
+    for path in ROOT.rglob("*"):
+        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix not in {".h", ".c", ".S", ".mk"} and path.name != "Makefile":
+            continue
+        data = path.read_bytes()
+        if needle not in data:
+            continue
+        text = data.decode("utf-8", "replace")
+        new = text.replace(
+            "#define OPLUS_FEATURE_SCHED_ASSIST",
+            "/* vendor absent */ #undef OPLUS_FEATURE_SCHED_ASSIST",
+        )
+        new = new.replace("-DOPLUS_FEATURE_SCHED_ASSIST", "-UOPLUS_FEATURE_SCHED_ASSIST")
+        if new != text:
+            path.write_text(new)
+            print(f"neutralized {path.relative_to(ROOT).as_posix()}")
+
+
 def disable_vendor_configs():
     defconfig = ROOT / "arch/arm64/configs/k6833v1_64_k419_defconfig"
     text = defconfig.read_text()
@@ -105,6 +146,11 @@ def disable_vendor_configs():
     ):
         text = text.replace(f"{name}=y", f"# {name} is not set")
     defconfig.write_text(text)
+    makefile = ROOT / "Makefile"
+    extra = "\nKBUILD_CFLAGS += -UOPLUS_FEATURE_SCHED_ASSIST\nKBUILD_CPPFLAGS += -UOPLUS_FEATURE_SCHED_ASSIST\n"
+    body = makefile.read_text()
+    if "-UOPLUS_FEATURE_SCHED_ASSIST" not in body:
+        makefile.write_text(body + extra)
 
 
 def main():
@@ -114,6 +160,8 @@ def main():
         print(f"  stub {path.relative_to(ROOT).as_posix()}")
         stub_symlink(path)
     ensure_source_targets()
+    write_sched_assist_headers()
+    neutralize_sched_assist_macro()
     strip_cr()
     disable_vendor_configs()
 
