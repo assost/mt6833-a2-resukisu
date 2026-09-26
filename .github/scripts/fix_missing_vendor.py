@@ -484,6 +484,7 @@ def keep_walt_without_sched_assist():
         "static inline void sf_task_util_record(struct task_struct *p) { }\n"
         "static inline int test_task_ux(struct task_struct *p) { return 0; }\n"
         "static inline int sched_assist_scene(int scene) { return 0; }\n"
+        "static inline int is_heavy_ux_task(struct task_struct *p) { return 0; }\n"
         "static const int sysctl_sched_assist_enabled;\n"
         "#endif\n\n"
     )
@@ -615,6 +616,31 @@ def patch_known_vendor_callers():
             text = text.replace(anchor, anchor + "#include <linux/proc_fs.h>\n", 1)
             print("included proc_fs.h")
         vmscan.write_text(text)
+    slub = ROOT / "mm/slub.c"
+    if slub.is_file():
+        text = slub.read_text()
+        old = (
+            "#else\n"
+            "static inline void setup_object_debug(struct kmem_cache *s,\n"
+            "\t\t\tstruct page *page, void *object) {}\n"
+            "\n"
+            "static inline int alloc_debug_processing(struct kmem_cache *s,\n"
+        )
+        new = (
+            "#else\n"
+            "static inline void setup_object_debug(struct kmem_cache *s,\n"
+            "\t\t\tstruct page *page, void *object) {}\n"
+            "static inline void setup_page_debug(struct kmem_cache *s,\n"
+            "\t\t\tvoid *addr, int order) {}\n"
+            "\n"
+            "static inline int alloc_debug_processing(struct kmem_cache *s,\n"
+        )
+        if new not in text:
+            if old not in text:
+                raise SystemExit("slub debug fallback missing")
+            text = text.replace(old, new, 1)
+            print("stubbed setup_page_debug")
+        slub.write_text(text)
 
 
 def main():

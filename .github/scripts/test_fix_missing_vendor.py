@@ -182,6 +182,17 @@ int direct_vm_swappiness = 60;
 #endif /*OPLUS_FEATURE_ZRAM_OPT*/
 """,
     )
+    write(
+        work / "mm/slub.c",
+        """
+#else
+static inline void setup_object_debug(struct kmem_cache *s,
+			struct page *page, void *object) {}
+
+static inline int alloc_debug_processing(struct kmem_cache *s,
+	struct page *page, void *object, unsigned long addr) { return 0; }
+""",
+    )
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)],
         cwd=work,
@@ -269,6 +280,11 @@ int direct_vm_swappiness = 60;
         raise SystemExit("walt externs stayed behind sched_assist")
     if "static inline void sf_task_util_record" not in kernel_sched:
         raise SystemExit("fair.c assist stubs were not inserted")
+    if "static inline int is_heavy_ux_task" not in kernel_sched:
+        raise SystemExit("is_heavy_ux_task stub missing")
+    slub = (work / "mm/slub.c").read_text(encoding="utf-8")
+    if "static inline void setup_page_debug" not in slub:
+        raise SystemExit("setup_page_debug fallback missing")
     adapt = SCRIPT.parent / "adapt.py"
     if "#include <linux/cred.h>" not in adapt.read_text(encoding="utf-8"):
         raise SystemExit("susfs uid helper cannot see current_uid")
