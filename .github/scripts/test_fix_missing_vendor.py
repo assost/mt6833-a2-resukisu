@@ -114,6 +114,14 @@ endif
         "#include <linux/posix_types.h>\n#include <generated/autoconf.h>\n",
     )
     write(
+        work / "kernel/sysctl.c",
+        "static int one_hundred = 100;\n"
+        "#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)\n"
+        "extern int direct_vm_swappiness;\n"
+        "static int two_hundred = 200;\n"
+        "#endif /*OPLUS_FEATURE_ZRAM_OPT*/\n",
+    )
+    write(
         work / "kernel/trace/trace_mmstat.c",
         "\t\t\t\tbuddyinfo[order + 1] =\n\t\t\t\t\tzone->free_area[flc][order].nr_free;\n",
     )
@@ -335,6 +343,9 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if "ion_total" not in ion:
         raise SystemExit("healthinfo ion stub missing")
     mmstat = (work / "kernel/trace/trace_mmstat.c").read_text(encoding="utf-8")
+    sysctl = (work / "kernel/sysctl.c").read_text(encoding="utf-8")
+    if not sysctl.startswith("static int one_hundred = 100;\nstatic int two_hundred = 200;\n"):
+        raise SystemExit("two_hundred stayed behind ZRAM_OPT")
     if "zone->free_area[order].nr_free;" not in mmstat:
         raise SystemExit("buddyinfo still requires the vendor free-area index")
     opened = (work / "fs/open.c").read_text(encoding="utf-8")

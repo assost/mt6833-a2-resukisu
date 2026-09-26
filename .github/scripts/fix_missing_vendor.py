@@ -549,6 +549,33 @@ static inline bool oplus_daily_build(void) {{ return false; }}
     print("stub include/soc/oplus/system/oplus_project.h")
 
 
+def keep_swappiness_limit():
+    path = ROOT / "kernel/sysctl.c"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    old = (
+        "static int one_hundred = 100;\n"
+        "#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)\n"
+        "extern int direct_vm_swappiness;\n"
+        "static int two_hundred = 200;\n"
+        "#endif /*OPLUS_FEATURE_ZRAM_OPT*/\n"
+    )
+    new = (
+        "static int one_hundred = 100;\n"
+        "static int two_hundred = 200;\n"
+        "#if defined(OPLUS_FEATURE_ZRAM_OPT) && defined(CONFIG_OPLUS_ZRAM_OPT)\n"
+        "extern int direct_vm_swappiness;\n"
+        "#endif /*OPLUS_FEATURE_ZRAM_OPT*/\n"
+    )
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit("swappiness limit anchor missing")
+    path.write_text(text.replace(old, new, 1))
+    print("kept two_hundred")
+
+
 def fix_buddyinfo_index():
     path = ROOT / "kernel/trace/trace_mmstat.c"
     if not path.is_file():
@@ -817,6 +844,7 @@ def main():
     write_oplus_project_header()
     write_healthinfo_ion_header()
     write_oppo_process_header()
+    keep_swappiness_limit()
     fix_buddyinfo_index()
     declare_ksu_hooks()
 
