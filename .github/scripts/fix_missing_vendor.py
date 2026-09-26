@@ -549,6 +549,83 @@ static inline bool oplus_daily_build(void) {{ return false; }}
     print("stub include/soc/oplus/system/oplus_project.h")
 
 
+def fix_buddyinfo_index():
+    path = ROOT / "kernel/trace/trace_mmstat.c"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    old = "\t\t\t\t\tzone->free_area[flc][order].nr_free;\n"
+    new = (
+        "#if defined(OPLUS_FEATURE_MULTI_FREEAREA) && defined(CONFIG_PHYSICAL_ANTI_FRAGMENTATION)\n"
+        "\t\t\t\t\tzone->free_area[flc][order].nr_free;\n"
+        "#else\n"
+        "\t\t\t\t\tzone->free_area[order].nr_free;\n"
+        "#endif\n"
+    )
+    if "zone->free_area[order].nr_free;" in text:
+        return
+    if old not in text:
+        raise SystemExit("buddyinfo free_area index missing")
+    path.write_text(text.replace(old, new, 1))
+    print("buddyinfo uses one free_area index")
+
+
+def declare_ksu_hooks():
+    hooks = (
+        (
+            "fs/open.c",
+            "ksu_handle_faccessat(",
+            "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n",
+        ),
+        (
+            "fs/stat.c",
+            "ksu_handle_stat(",
+            "int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n",
+        ),
+        (
+            "fs/read_write.c",
+            "ksu_handle_sys_read(",
+            "int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n",
+        ),
+        (
+            "fs/exec.c",
+            "ksu_handle_execveat(",
+            "int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);\n"
+            "int ksu_handle_post_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags, int *retval);\n",
+        ),
+        (
+            "kernel/reboot.c",
+            "ksu_handle_sys_reboot(",
+            "int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n",
+        ),
+        (
+            "kernel/sys.c",
+            "ksu_handle_setresuid(",
+            "int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n",
+        ),
+        (
+            "drivers/input/input.c",
+            "ksu_handle_input_handle_event(",
+            "int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n",
+        ),
+    )
+    for rel, call, prototype in hooks:
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        if call not in text or prototype in text:
+            continue
+        lines = text.splitlines(keepends=True)
+        insert_at = 0
+        for index, line in enumerate(lines[:160]):
+            if line.startswith("#include"):
+                insert_at = index + 1
+        lines.insert(insert_at, prototype)
+        path.write_text("".join(lines))
+        print(f"declared {rel}")
+
+
 def write_healthinfo_ion_header():
     path = ROOT / "include/linux/healthinfo/ion.h"
     if path.is_file() and STUB_MARK not in path.read_text(errors="replace"):
@@ -712,6 +789,8 @@ def main():
     keep_walt_without_sched_assist()
     write_oplus_project_header()
     write_healthinfo_ion_header()
+    fix_buddyinfo_index()
+    declare_ksu_hooks()
 
 
 if __name__ == "__main__":

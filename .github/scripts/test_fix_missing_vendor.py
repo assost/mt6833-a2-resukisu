@@ -114,6 +114,19 @@ endif
         "#include <linux/posix_types.h>\n#include <generated/autoconf.h>\n",
     )
     write(
+        work / "kernel/trace/trace_mmstat.c",
+        "\t\t\t\tbuddyinfo[order + 1] =\n\t\t\t\t\tzone->free_area[flc][order].nr_free;\n",
+    )
+    write(
+        work / "fs/open.c",
+        "#include <linux/fs.h>\n"
+        "int sys_faccessat(void)\n"
+        "{\n"
+        "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+        "\treturn 0;\n"
+        "}\n",
+    )
+    write(
         work / "init/extra.c",
         "#include <linux/not_a_vendor_header.h>\n",
     )
@@ -318,6 +331,12 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     ion = (work / "include/linux/healthinfo/ion.h").read_text(encoding="utf-8")
     if "ion_total" not in ion:
         raise SystemExit("healthinfo ion stub missing")
+    mmstat = (work / "kernel/trace/trace_mmstat.c").read_text(encoding="utf-8")
+    if "zone->free_area[order].nr_free;" not in mmstat:
+        raise SystemExit("buddyinfo still requires the vendor free-area index")
+    opened = (work / "fs/open.c").read_text(encoding="utf-8")
+    if "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);" not in opened:
+        raise SystemExit("faccessat hook has no prototype")
     print("vendor macro suppression ok")
 
 
