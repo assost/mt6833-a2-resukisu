@@ -111,6 +111,7 @@ SCHED_ASSIST_HEADERS = (
     "sched_assist_common.h",
     "sched_assist_slide.h",
     "sched_assist_locking.h",
+    "sched_assist_rwsem.h",
 )
 
 
@@ -221,7 +222,10 @@ def main():
         stub_symlink(path)
     ensure_source_targets()
     write_sched_assist_headers()
-    create_missing_headers()
+    version = ROOT / "include/linux/version.h"
+    if not version.exists():
+        version.write_text("#include <generated/uapi/linux/version.h>\n")
+        print("restored include/linux/version.h")
     neutralize_sched_assist_macro()
     allow_vdso_text_relocs()
     strip_cr()
