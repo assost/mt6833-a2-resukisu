@@ -9,6 +9,14 @@ import re
 from pathlib import Path
 
 INCLUDE_RE = re.compile(r'#include\s*[<"]([^>"]+\.h)[>"]')
+UPSTREAM_HEADERS = {
+    "include/linux/posix_types.h":
+        "https://raw.githubusercontent.com/torvalds/linux/v4.19.191/include/linux/posix_types.h",
+    "include/asm-generic/posix_types.h":
+        "https://raw.githubusercontent.com/torvalds/linux/v4.19.191/include/asm-generic/posix_types.h",
+    "arch/arm64/include/asm/posix_types.h":
+        "https://raw.githubusercontent.com/torvalds/linux/v4.19.191/arch/arm64/include/asm/posix_types.h",
+}
 
 ROOT = Path(".").resolve()
 
@@ -117,6 +125,17 @@ def write_sched_assist_headers():
             print(f"header {path.relative_to(ROOT).as_posix()}")
 
 
+def restore_standard_headers():
+    import urllib.request
+    for rel, url in UPSTREAM_HEADERS.items():
+        dest = ROOT / rel
+        if dest.exists() and dest.stat().st_size > 200:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, dest)
+        print(f"restored {rel}")
+
+
 def create_missing_headers():
     created = 0
     for path in list(ROOT.rglob("*")):
@@ -188,6 +207,7 @@ def main():
         stub_symlink(path)
     ensure_source_targets()
     write_sched_assist_headers()
+    restore_standard_headers()
     create_missing_headers()
     neutralize_sched_assist_macro()
     strip_cr()
