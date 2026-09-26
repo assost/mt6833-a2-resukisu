@@ -618,8 +618,14 @@ def declare_ksu_hooks():
             continue
         lines = text.splitlines(keepends=True)
         insert_at = 0
-        for index, line in enumerate(lines[:160]):
-            if line.startswith("#include"):
+        depth = 0
+        for index, line in enumerate(lines[:240]):
+            stripped = line.strip()
+            if stripped.startswith("#if"):
+                depth += 1
+            elif stripped.startswith("#endif"):
+                depth = max(0, depth - 1)
+            elif depth == 0 and stripped.startswith("#include"):
                 insert_at = index + 1
         lines.insert(insert_at, prototype)
         path.write_text("".join(lines))
@@ -642,6 +648,26 @@ static inline unsigned long ion_total(void) {{ return 0; }}
         encoding="utf-8",
     )
     print("stub include/linux/healthinfo/ion.h")
+
+
+def write_oppo_process_header():
+    path = ROOT / "include/soc/oplus/system/oppo_process.h"
+    if path.is_file() and STUB_MARK not in path.read_text(errors="replace"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""/* {STUB_MARK} */
+#ifndef _OPPO_PROCESS_STUB_H_
+#define _OPPO_PROCESS_STUB_H_
+struct pid;
+struct task_struct;
+static inline bool oppo_is_android_core_group(struct pid *pgrp) {{ return false; }}
+static inline void oplus_boost_kill_signal(int sig, struct task_struct *caller, struct task_struct *target) {{}}
+#endif
+""",
+        encoding="utf-8",
+    )
+    print("stub include/soc/oplus/system/oppo_process.h")
 
 
 def patch_known_vendor_callers():
@@ -789,6 +815,7 @@ def main():
     keep_walt_without_sched_assist()
     write_oplus_project_header()
     write_healthinfo_ion_header()
+    write_oppo_process_header()
     fix_buddyinfo_index()
     declare_ksu_hooks()
 

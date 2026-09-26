@@ -120,6 +120,9 @@ endif
     write(
         work / "fs/open.c",
         "#include <linux/fs.h>\n"
+        "#if defined(OPLUS_FEATURE_IOMONITOR)\n"
+        "#include <linux/existing.h>\n"
+        "#endif\n"
         "int sys_faccessat(void)\n"
         "{\n"
         "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
@@ -335,8 +338,12 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if "zone->free_area[order].nr_free;" not in mmstat:
         raise SystemExit("buddyinfo still requires the vendor free-area index")
     opened = (work / "fs/open.c").read_text(encoding="utf-8")
-    if "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);" not in opened:
-        raise SystemExit("faccessat hook has no prototype")
+    proto = "int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);"
+    if proto not in opened.split("#if", 1)[0] and proto not in opened.split("#endif", 1)[-1]:
+        raise SystemExit("faccessat prototype was hidden inside an ifdef")
+    process = (work / "include/soc/oplus/system/oppo_process.h").read_text(encoding="utf-8")
+    if "oppo_is_android_core_group" not in process:
+        raise SystemExit("oppo_process stub missing")
     print("vendor macro suppression ok")
 
 
