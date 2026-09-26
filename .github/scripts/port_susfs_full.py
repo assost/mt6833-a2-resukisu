@@ -131,18 +131,29 @@ must_replace(
 		ret = get_user_pages_remote(tsk, mm, addr, 1,""",
 )
 
-mem = (ROOT / "mm/memory.c").read_text()
-if "linux/susfs_def.h" not in mem:
-    mem = mem.replace(
-        "#include <linux/ptrace.h>\n",
-        """#include <linux/ptrace.h>
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+def ensure_susfs_include(rel):
+    path = ROOT / rel
+    text = path.read_text()
+    if "linux/susfs_def.h" in text:
+        return
+    block = """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
 #include <linux/susfs_def.h>
 #endif
-""",
-        1,
-    )
-    (ROOT / "mm/memory.c").write_text(mem)
+"""
+    needle = "#include <linux/ptrace.h>\n"
+    if needle in text:
+        text = text.replace(needle, needle + block, 1)
+    else:
+        first = text.find("#include ")
+        if first < 0:
+            raise SystemExit(f"no include in {rel}")
+        line_end = text.find("\n", first)
+        text = text[: line_end + 1] + block + text[line_end + 1 :]
+    path.write_text(text)
+
+
+ensure_susfs_include("mm/memory.c")
+ensure_susfs_include("fs/proc/task_mmu.c")
 
 must_replace(
     "security/selinux/avc.c",

@@ -21,12 +21,17 @@ if proc.returncode != 0:
     raise SystemExit(proc.returncode)
 
 checks = {
+
+    "mm/memory.c": [
+        "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))",
+        "#include <linux/susfs_def.h>",
+    ],
     "fs/proc/task_mmu.c": [
         "SUSFS_IS_INODE_SUS_MAP(inode)",
         "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))",
         "SUSFS_IS_INODE_SUS_MAP(file_inode(map_vma->vm_file))",
+        "#include <linux/susfs_def.h>",
     ],
-    "mm/memory.c": ["SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))"],
     "security/selinux/avc.c": [
         "susfs_is_avc_log_spoofing_enabled",
         "u:r:priv_app:s0:c512,c768",

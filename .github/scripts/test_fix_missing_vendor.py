@@ -235,6 +235,9 @@ int direct_vm_swappiness = 60;
         raise SystemExit("direct_vm_swappiness declaration missing")
     if "#include <linux/proc_fs.h>" not in vmscan:
         raise SystemExit("proc_fs.h was not included")
+    project = (work / "include/soc/oplus/system/oplus_project.h").read_text(encoding="utf-8")
+    if "is_project" not in project or "get_project" not in project:
+        raise SystemExit("oplus project stub is missing the callers used by fair.c")
     print("vendor macro suppression ok")
 
 

@@ -439,6 +439,30 @@ def apply_macro_suppression(macros):
         print(f"  undef {name}")
 
 
+def write_oplus_project_header():
+    path = ROOT / "include/soc/oplus/system/oplus_project.h"
+    if path.is_file() and path.stat().st_size > 200 and STUB_MARK not in path.read_text(errors="replace"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""/* {STUB_MARK} */
+#ifndef _OPLUS_PROJECT_STUB_H_
+#define _OPLUS_PROJECT_STUB_H_
+#include <linux/types.h>
+static inline unsigned int get_project(void) {{ return 0; }}
+static inline unsigned int is_project(int project) {{ return 0; }}
+static inline unsigned int get_PCB_Version(void) {{ return 0; }}
+static inline unsigned int get_Operator_Version(void) {{ return 0; }}
+static inline unsigned int get_Modem_Version(void) {{ return 0; }}
+static inline int get_eng_version(void) {{ return 0; }}
+static inline bool oplus_daily_build(void) {{ return false; }}
+#endif
+""",
+        encoding="utf-8",
+    )
+    print("stub include/soc/oplus/system/oplus_project.h")
+
+
 def patch_known_vendor_callers():
     """Skip unpublished scheduler fields and keep the hybridswap proc node compiling."""
     core = ROOT / "kernel/sched/core.c"
@@ -556,6 +580,7 @@ def main():
     disable_vendor_configs()
     apply_macro_suppression(macros)
     patch_known_vendor_callers()
+    write_oplus_project_header()
 
 
 if __name__ == "__main__":
