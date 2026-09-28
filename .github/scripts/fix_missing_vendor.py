@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Replace broken vendor symlinks with empty build stubs and strip Kconfig CRs.
+"""Repair the A2 build with an explicit mode for fully restored vendor sources.
 
-Commenting out source lines drops endif/endmenu that live in the missing
-file and makes the parent endmenu unexpected. Empty files keep the parse.
+--restored-vendor validates the restore manifest and keeps factory behavior.
+The default legacy mode retains historical missing-source stubs for rollback.
 """
+import argparse
 import fnmatch
+import json
 import os
 import re
 from pathlib import Path
@@ -723,6 +725,41 @@ def fix_dpmaif_dump_pointers():
         print("DPMAIF: dump pointer prefixes use %p without truncation")
 
 
+
+def fix_fhctl_register_offset():
+    path = ROOT / "drivers/misc/mediatek/freqhopping/fhctl_new/clk-fhctl-mcupm.c"
+    if not path.is_file():
+        return
+    original = path.read_bytes()
+    old = b"+ (unsigned int)match_data->reg_tr;"
+    new = b"+ (unsigned long)match_data->reg_tr;"
+    if original.count(new) == 1 and old not in original:
+        return
+    if original.count(old) != 1 or new in original:
+        raise SystemExit("FHCTL register offset expression missing or ambiguous")
+    path.write_bytes(original.replace(old, new, 1))
+    print("FHCTL: register offset uses pointer-width unsigned long")
+
+
+def fix_pmu_charger_track_includes():
+    directory = ROOT / "drivers/misc/mediatek/pmic/mt6360/v1/pmu"
+    old = b'#include "../../../../../power/oplus/oplus_chg_track.h"'
+    new = b'#include "../../../../../../power/oplus/oplus_chg_track.h"'
+    for name in ("mt6360_pmu_chg.c", "mt6360_pmu_irq.c"):
+        path = directory / name
+        if not path.is_file():
+            continue
+        if not (ROOT / "drivers/power/oplus/oplus_chg_track.h").is_file():
+            raise SystemExit("required restored charging header missing: drivers/power/oplus/oplus_chg_track.h")
+        original = path.read_bytes()
+        if original.count(new) == 1 and old not in original:
+            continue
+        if original.count(old) != 1 or new in original:
+            raise SystemExit(f"PMU charging include missing or ambiguous: {name}")
+        path.write_bytes(original.replace(old, new, 1))
+        print(f"PMU: {name} resolves the restored charging header")
+
+
 def keep_swappiness_limit():
     path = ROOT / "kernel/sysctl.c"
     if not path.is_file():
@@ -996,7 +1033,74 @@ def patch_known_vendor_callers():
         slub.write_text(text)
 
 
-def main():
+
+def validate_restored_vendor():
+    manifest_path = ROOT / ".build-deps/vendor-restore-manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"restored vendor manifest is missing or invalid: {error}")
+    if (not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or
+            manifest.get("mode") != "all" or
+            manifest.get("status") != "complete" or manifest.get("unavailable") != []):
+        raise SystemExit("restored vendor manifest is incomplete; resolve all unavailable sources first")
+    tree_name = manifest.get("installed_tree")
+    restored = manifest.get("restored")
+    if not isinstance(tree_name, str) or not isinstance(restored, list) or not restored:
+        raise SystemExit("restored vendor manifest has no verified source tree or restored entries")
+    tree = (ROOT / tree_name).resolve()
+    if not tree.is_relative_to(ROOT / ".build-deps") or not tree.is_dir():
+        raise SystemExit("restored vendor source tree must exist inside .build-deps")
+    for entry in restored:
+        if not isinstance(entry, dict) or not all(isinstance(entry.get(key), str) for key in ("path", "source")):
+            raise SystemExit("restored vendor manifest has an invalid source entry")
+        alias, source = Path(entry["path"]), Path(entry["source"])
+        if alias.is_absolute() or source.is_absolute() or ".." in alias.parts or ".." in source.parts:
+            raise SystemExit("restored vendor manifest source paths must be relative to their trees")
+        try:
+            installed = (ROOT / alias).resolve(strict=True)
+            expected = (tree / source).resolve(strict=True)
+        except OSError as error:
+            raise SystemExit(f"required restored source is unavailable: {entry['path']}: {error}")
+        if installed != expected or not installed.is_relative_to(tree):
+            raise SystemExit(f"required restored source points outside the verified tree: {entry['path']}")
+    makefile = ROOT / "Makefile"
+    if makefile.is_file() and re.search(r"-UOPLUS_[A-Z0-9_]+", makefile.read_text()):
+        raise SystemExit("legacy vendor suppression remains in Makefile; use a fresh restored checkout")
+    print(f"restored vendor manifest: {len(restored)} source aliases verified")
+    return tree
+
+
+def run_restored_vendor():
+    tree = validate_restored_vendor()
+    # Only compiler/prototype repairs and KSU declarations survive this mode.
+    # Scheduler/MM fallbacks and identity stubs belong to the legacy mode.
+    allow_vdso_text_relocs()
+    strip_cr()
+    for directory, _, names in os.walk(tree, followlinks=False):
+        for name in names:
+            path = Path(directory) / name
+            if fnmatch.fnmatch(name, "Kconfig*") and not path.is_symlink():
+                data = path.read_bytes()
+                if b"\r" in data:
+                    path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+    version = ROOT / "include/linux/version.h"
+    if not version.exists():
+        version.write_text("#include <generated/uapi/linux/version.h>\n")
+    fix_drm_device_prototype()
+    fix_sia81xx_prototypes()
+    mark_esd_worker_unused_locals()
+    fix_dpmaif_dump_pointers()
+    fix_fhctl_register_offset()
+    fix_pmu_charger_track_includes()
+    declare_ksu_hooks()
+    print("restored vendor mode: factory macros, configuration, headers and performance code retained")
+
+
+def main(restored_vendor=False):
+    if restored_vendor:
+        run_restored_vendor()
+        return
     missing = broken_symlinks()
     print(f"broken symlinks: {len(missing)}")
     for path in missing:
@@ -1032,4 +1136,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--restored-vendor", action="store_true",
+                        help="require a complete restore manifest and preserve factory vendor behavior")
+    main(restored_vendor=parser.parse_args().restored_vendor)

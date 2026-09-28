@@ -2,6 +2,7 @@
 """Run fix_missing_vendor.py on a fixture and check vendor macros are undefined."""
 import contextlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -463,6 +464,8 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     check_vendor_compat(work)
     check_panel_project_fallbacks(work)
     check_dpmaif_dump_pointers(work)
+    platform_fixtures = check_platform_vendor_fixes(work)
+    check_restored_vendor_mode(work, platform_fixtures)
     check_include_cache(work)
 
 
@@ -790,6 +793,172 @@ int main(void) {
     result = subprocess.run(base + ["-fsyntax-only", str(mutant)], capture_output=True, text=True)
     assert result.returncode != 0 and "pointer-to-int-cast" in result.stderr
     print("DPMAIF: strict format check, full pointer width, offsets/data, source preservation and idempotence PASS; truncation regression rejected")
+
+
+
+
+def check_platform_vendor_fixes(work):
+    scope = {"__name__": "platform_vendor_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    root = work / "platform-full-vendor-fixture"
+    scope["ROOT"] = root
+    fhctl = "drivers/misc/mediatek/freqhopping/fhctl_new/clk-fhctl-mcupm.c"
+    pmu = "drivers/misc/mediatek/pmic/mt6360/v1/pmu/"
+    old_expr = b"+ (unsigned int)match_data->reg_tr;"
+    new_expr = b"+ (unsigned long)match_data->reg_tr;"
+    old_include = b'#include "../../../../../power/oplus/oplus_chg_track.h"'
+    new_include = b'#include "../../../../../../power/oplus/oplus_chg_track.h"'
+    inputs = {fhctl: b"priv_data->reg_tr = array->fhctl_base\n\t\t\t" + old_expr + b"\n",
+              pmu + "mt6360_pmu_chg.c": old_include + b"\n",
+              pmu + "mt6360_pmu_irq.c": old_include + b"\n"}
+    if len(sys.argv) > 10:
+        inputs = {rel: (Path(sys.argv[10]) / rel).read_bytes() for rel in inputs}
+    for rel, content in inputs.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    target = root / "drivers/power/oplus/oplus_chg_track.h"
+    write(target, "#define CHARGING_TRACK_MARKER 0x6360\n")
+    scope["fix_fhctl_register_offset"]()
+    scope["fix_pmu_charger_track_includes"]()
+    outputs = {rel: (root / rel).read_bytes() for rel in inputs}
+    assert outputs[fhctl].replace(new_expr, old_expr, 1) == inputs[fhctl]
+    for rel in inputs:
+        if rel != fhctl:
+            assert outputs[rel].replace(new_include, old_include, 1) == inputs[rel]
+            assert ((root / rel).parent / "../../../../../../power/oplus/oplus_chg_track.h").resolve() == target.resolve()
+            assert not ((root / rel).parent / "../../../../../power/oplus/oplus_chg_track.h").exists()
+    scope["fix_fhctl_register_offset"]()
+    scope["fix_pmu_charger_track_includes"]()
+    assert all((root / rel).read_bytes() == content for rel, content in outputs.items())
+    compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+    if not compiler:
+        raise SystemExit("clang is required for the ARM64 FHCTL regression")
+    expression_text = outputs[fhctl].decode().replace("\r\n", "\n")
+    start = expression_text.index("priv_data->reg_tr = array->fhctl_base")
+    expression = expression_text[start:expression_text.index(";", start) + 1]
+    source = ('struct registers { void *reg_tr; };\nstruct pll { void *fhctl_base; };\n'
+              '_Static_assert(sizeof(unsigned long) == 8 && sizeof(void *) == 8, "ARM64 width");\n')
+    for name, offset in (("high_offset", "0x200000090UL"), ("hardware_offset", "0xCCUL")):
+        source += (f"unsigned long {name}(void) {{\n"
+                   "struct registers match = {.reg_tr = (void *)" + offset + "}, output;\n"
+                   "struct registers *match_data = &match, *priv_data = &output;\n"
+                   "struct pll instance = {.fhctl_base = (void *)0x100000000UL}, *array = &instance;\n" +
+                   expression + "\nreturn (unsigned long)priv_data->reg_tr;\n}\n")
+    unit = root / "fhctl_width.c"
+    write(unit, source)
+    llvm = root / "fhctl_width.ll"
+    base = [compiler, "--target=aarch64-linux-gnu", "-std=gnu11", "-ffreestanding", "-nostdinc", "-Wall", "-Werror"]
+    result = subprocess.run(base + ["-O2", "-S", "-emit-llvm", str(unit), "-o", str(llvm)], capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit(result.stdout + result.stderr)
+    ir = llvm.read_text()
+    assert "ret i64 12884902032" in ir and "ret i64 4294967500" in ir, ir
+    mutant = root / "fhctl_width_truncating.c"
+    write(mutant, source.replace("(unsigned long)match_data->reg_tr", "(unsigned int)match_data->reg_tr"))
+    result = subprocess.run(base + ["-fsyntax-only", str(mutant)], capture_output=True, text=True)
+    assert result.returncode != 0 and "void-pointer-to-int-cast" in result.stderr
+    probe = root / pmu / "charger_include_probe.c"
+    write(probe, new_include.decode() + '\n_Static_assert(CHARGING_TRACK_MARKER == 0x6360, "correct charging header");\n')
+    result = subprocess.run(base + ["-fsyntax-only", str(probe)], capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit(result.stdout + result.stderr)
+    print("platform fixes: ARM64 high and 0xCC offsets, truncation rejection, real charging include path, exact source scope and idempotence PASS")
+    return {rel: (inputs[rel], outputs[rel]) for rel in inputs}
+
+
+def check_restored_vendor_mode(work, platform_fixtures):
+    root = work / "restored-vendor-fixture"
+    tree = root / ".build-deps/restore-all-test/source"
+    system = tree / "vendor/oplus/kernel/system/include"
+    system.mkdir(parents=True)
+    if len(sys.argv) > 9:
+        real_headers = Path(sys.argv[9]) / "vendor/oplus/kernel/system/include"
+        shutil.copytree(real_headers, system, dirs_exist_ok=True)
+        print(f"restored mode: checking original system headers from {real_headers}")
+    else:
+        write(system / "oplus_project.h", "extern unsigned int get_project(void);\nextern unsigned int is_project(int project);\n")
+        write(system / "boot_mode.h", "extern int get_boot_mode(void);\n")
+    alias = root / "include/soc/oplus/system"
+    alias.parent.mkdir(parents=True)
+    if os.name == "nt":
+        linked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(system)],
+                                capture_output=True, text=True)
+        if linked.returncode:
+            raise SystemExit(linked.stdout + linked.stderr)
+    else:
+        alias.symlink_to(system, target_is_directory=True)
+    originals = {
+        "Makefile": b"KBUILD_CFLAGS += -Wall\n",
+        "OplusKernelEnvConfig.mk": Path(sys.argv[2]).read_bytes() if len(sys.argv) > 2 else b"ALLOWED_MCROS := OPLUS_FEATURE_CHG_BASIC OPLUS_FEATURE_CAMERA_COMMON OPLUS_FEATURE_SENSOR OPLUS_FEATURE_SCHED_ASSIST\n",
+        "arch/arm64/configs/k6833v1_64_k419_defconfig": b"CONFIG_LTO_CLANG=y\nCONFIG_CFI_CLANG=y\nCONFIG_LOCKING_PROTECT=y\nCONFIG_KERNEL_LOCK_OPT=y\nCONFIG_OPLUS_LOCKING_STRATEGY=y\nCONFIG_OPLUS_FEATURE_SCHED_ASSIST=y\nCONFIG_OPLUS_HVDCP_SUPPORT=y\n",
+        "include/linux/version.h": b"#include <generated/uapi/linux/version.h>\n",
+        "include/linux/workqueue.h": Path(sys.argv[3]).read_bytes() if len(sys.argv) > 3 else b"enum { WQ_UX = 1 << 15 };\n",
+        "kernel/sched/core.c": b"unsigned long vendor_uclamp(void) { return ux_uclamp_value; }\n",
+        "kernel/sched/sched.h": b"extern int is_heavy_ux_task(struct task_struct *task);\n",
+        "mm/vmscan.c": b"#ifdef OPLUS_FEATURE_ZRAM_OPT\nint direct_vm_swappiness = 60;\n#endif\n",
+        "mm/slub.c": b"/* original allocator implementation */\n",
+        "kernel/trace/trace_mmstat.c": b"/* original two-dimensional vendor free-area layout */\n",
+    }
+    for rel, data in originals.items():
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    for rel, (before, _) in platform_fixtures.items():
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(before)
+    write(root / "drivers/power/oplus/oplus_chg_track.h", "#define CHARGING_TRACK_MARKER 0x6360\n")
+    header_bytes = {path: path.read_bytes() for path in system.rglob("*") if path.is_file()}
+    write(root / "arch/arm64/kernel/vdso/Makefile", "ldflags-y := --build-id -n -T\n")
+    write(root / "fs/open.c", '#include <linux/cred.h>\nint invoke(void) { return ksu_handle_faccessat(0, 0, 0, 0); }\n')
+    configs = [root / "Kconfig", tree / "vendor/oplus/kernel/system/Kconfig"]
+    for config in configs:
+        config.write_bytes(b'config VENDOR_PRESENT\r\n\tbool "vendor implementation"\r\n')
+    manifest_path = root / ".build-deps/vendor-restore-manifest.json"
+    manifest = {"schema_version": 1, "mode": "all", "status": "complete", "unavailable": [],
+                "installed_tree": tree.relative_to(root).as_posix(),
+                "source_commit": "dd93a63de24dec560639b88d8328d4be7100a60d",
+                "restored": [{"path": alias.relative_to(root).as_posix(),
+                              "source": system.relative_to(tree).as_posix()}]}
+
+    def snapshot():
+        return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def rejected(expected):
+        before = snapshot()
+        result = subprocess.run([sys.executable, str(SCRIPT), "--restored-vendor"], cwd=root,
+                                capture_output=True, text=True)
+        assert result.returncode != 0 and expected in result.stderr, result.stdout + result.stderr
+        assert snapshot() == before, "invalid restoration was modified before rejection"
+
+    rejected("manifest is missing or invalid")
+    manifest_path.write_text(json.dumps({**manifest, "status": "partial", "unavailable": [{"path": "drivers/power/oplus"}]}))
+    rejected("incomplete")
+    manifest_path.write_text(json.dumps({**manifest, "restored": [{"path": alias.relative_to(root).as_posix(), "source": "missing-required-source"}]}))
+    rejected("required restored source is unavailable")
+    manifest_path.write_text(json.dumps(manifest))
+    result = subprocess.run([sys.executable, str(SCRIPT), "--restored-vendor"], cwd=root,
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit(result.stdout + result.stderr)
+    assert "restored vendor mode:" in result.stdout
+    assert all((root / rel).read_bytes() == after for rel, (_, after) in platform_fixtures.items())
+    assert all((root / rel).read_bytes() == data for rel, data in originals.items())
+    assert all(path.read_bytes() == data for path, data in header_bytes.items())
+    assert all(config.read_bytes() == b'config VENDOR_PRESENT\n\tbool "vendor implementation"\n' for config in configs)
+    assert "-z notext" in (root / "arch/arm64/kernel/vdso/Makefile").read_text()
+    assert "int ksu_handle_faccessat(int *dfd" in (root / "fs/open.c").read_text()
+    assert not (root / "include/linux/healthinfo/ion.h").exists()
+    assert not (root / "include/soc/oplus/system/oppo_process.h").exists() or (system / "oppo_process.h") in header_bytes
+    before = snapshot()
+    subprocess.run([sys.executable, str(SCRIPT), "--restored-vendor"], cwd=root,
+                   check=True, capture_output=True)
+    assert snapshot() == before
+    (root / "Makefile").write_bytes(originals["Makefile"] + b"KBUILD_CFLAGS += -UOPLUS_FEATURE_CHG_BASIC\n")
+    rejected("legacy vendor suppression remains")
+    (root / "Makefile").write_bytes(originals["Makefile"])
+    print(f"restored mode: {len(header_bytes)} real header files and factory macro/config/performance bytes retained; required-source failures, CR-only normalization, KSU declarations and idempotence PASS")
 
 
 def check_include_cache(work):
