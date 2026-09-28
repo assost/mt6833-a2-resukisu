@@ -85,6 +85,24 @@ endif
             "    return drm_dev;\n}\nEXPORT_SYMBOL(get_drm_device);\n"
         )
     write(work / "drivers/gpu/drm/mediatek/mtk_debug.c", drm_source)
+    if len(sys.argv) > 5:
+        audio_source = Path(sys.argv[5]).read_text()
+    else:
+        audio_source = (
+            "void sia81xx_start(){\n        sia81xx_resume(g_sia81xx);\n}\n"
+            "void sia81xx_stop(){\n        sia81xx_suspend(g_sia81xx);\n}\n"
+        )
+    write(work / "sound/soc/codecs/audio/sia81xx/sia81xx.c", audio_source)
+    if len(sys.argv) > 6:
+        recovery_source = Path(sys.argv[6]).read_text()
+    else:
+        recovery_source = (
+            "static int mtk_drm_esd_check_worker_kthread(void *data)\n{\n"
+            "        struct mtk_ddp_comp *output_comp;\n"
+            "        unsigned int prj_id = get_project();\n"
+            "        sched_setscheduler(current, SCHED_RR, &param);\n}\n"
+        )
+    write(work / "drivers/gpu/drm/mediatek/mtk_disp_recovery.c", recovery_source)
     write(
         work / "arch/arm64/configs/k6833v1_64_k419_defconfig",
         "\n".join(
@@ -434,6 +452,14 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if "oppo_is_android_core_group" not in process or "is_critial_process" not in process or "is_key_process" not in process:
         raise SystemExit("oppo_process stub missing")
     print("vendor macro suppression ok")
+    audio_after = (work / "sound/soc/codecs/audio/sia81xx/sia81xx.c").read_text()
+    for name in ("sia81xx_start", "sia81xx_stop"):
+        audio_after = audio_after.replace(f"void {name}(void){{", f"void {name}(){{", 1)
+    assert audio_after == audio_source, "audio function bodies or unrelated source changed"
+    recovery_after = (work / "drivers/gpu/drm/mediatek/mtk_disp_recovery.c").read_text()
+    recovery_after = recovery_after.replace("*output_comp __maybe_unused;", "*output_comp;", 1)
+    recovery_after = recovery_after.replace("prj_id __maybe_unused = get_project();", "prj_id = get_project();", 1)
+    assert recovery_after == recovery_source, "unrelated ESD source or initializer changed"
     check_vendor_compat(work)
     check_include_cache(work)
 
@@ -487,6 +513,31 @@ def check_vendor_compat(work):
     start = drm.index("struct drm_device *get_drm_device(")
     end = drm.index("}", start) + 1
     drm_function = drm[start:end]
+    audio_path = work / "sound/soc/codecs/audio/sia81xx/sia81xx.c"
+    audio = audio_path.read_text()
+    audio_functions = []
+    for name in ("sia81xx_start", "sia81xx_stop"):
+        start = audio.index(f"void {name}(")
+        end = audio.index("}", start) + 1
+        audio_functions.append(audio[start:end])
+    recovery_path = work / "drivers/gpu/drm/mediatek/mtk_disp_recovery.c"
+    recovery = recovery_path.read_text()
+    start = recovery.index("static int mtk_drm_esd_check_worker_kthread(void *data)")
+    end = recovery.index("sched_setscheduler(current, SCHED_RR, &param);", start)
+    declarations = [line for line in recovery[start:end].splitlines()
+                    if "*output_comp" in line or "prj_id" in line]
+    assert len(declarations) == 2
+    audio_checks = r'''
+static int left_amp, right_amp;
+static void *g_sia81xx, *resume_target, *suspend_target;
+static unsigned int resume_calls, suspend_calls, project_calls;
+static void sia81xx_resume(void *amp) { resume_target = amp; resume_calls++; }
+static void sia81xx_suspend(void *amp) { suspend_target = amp; suspend_calls++; }
+static unsigned int tracked_get_project(void) { project_calls++; return 42; }
+#define __maybe_unused __attribute__((unused))
+#define get_project tracked_get_project
+static void exercise_esd_locals(void) {
+''' + "\n".join(declarations) + "\n}\n#undef get_project\n" + "\n".join(audio_functions)
     write(work / "include/linux/types.h", "#include <stdbool.h>\n")
     source = (
         "#include <soc/oplus/system/oppo_project.h>\n"
@@ -495,7 +546,7 @@ def check_vendor_compat(work):
         "struct drm_device { int id; };\n"
         "static struct drm_device device;\n"
         "static struct drm_device *drm_dev = &device;\n"
-    ) + drm_function + "\n" + enum_source + r'''
+    ) + drm_function + "\n" + enum_source + "\n" + audio_checks + r'''
 _Static_assert(RELEASE_VERSION == 0x00 && AGING == 0x01 && PREVERSION == 0x04 &&
                HIGH_TEMP_AGING == 0x0B && FACTORY == 0x0C, "official engineering IDs changed");
 #ifdef OPLUS_FEATURE_SCHED_ASSIST
@@ -506,10 +557,17 @@ _Static_assert(WQ_UX == 0, "disabled vendor extension is not neutral");
 _Static_assert((WQ_HIGHPRI | WQ_UNBOUND | WQ_UX) == ((1 << 4) | (1 << 1)), "Mali stock flags changed");
 #endif
 int main(void) {
+    g_sia81xx = &left_amp;
+    sia81xx_start();
+    g_sia81xx = &right_amp;
+    sia81xx_stop();
+    exercise_esd_locals();
     return get_eng_version() != RELEASE_VERSION || get_eng_version() == AGING ||
            get_eng_version() == PREVERSION || get_eng_version() == HIGH_TEMP_AGING ||
            get_eng_version() == FACTORY || get_PCB_Version() != 0 ||
-           get_drm_device() != drm_dev;
+           get_drm_device() != drm_dev || project_calls != 1 ||
+           resume_calls != 1 || suspend_calls != 1 ||
+           resume_target != &left_amp || suspend_target != &right_amp;
 }
 '''
     c_file = work / "vendor_compat.c"
@@ -528,7 +586,7 @@ int main(void) {
         if result.returncode:
             raise SystemExit(result.stdout + result.stderr)
         subprocess.run([str(executable)], cwd=work, check=True, timeout=15)
-        print(f"{name}: strict prototypes, legacy include, release and DRM pointer behavior passed")
+        print(f"{name}: strict prototypes, legacy include, release, DRM, audio targets and ESD initializer passed")
     mutant = work / "legacy_prototype_mutant.c"
     write(mutant, source.replace("get_drm_device(void)", "get_drm_device()"))
     command = [compiler, "-std=gnu11", "-Wstrict-prototypes", "-Werror", "-fsyntax-only",
@@ -549,9 +607,13 @@ int main(void) {
         scope["write_oplus_project_header"]()
         scope["write_oppo_project_forward_header"]()
         scope["fix_drm_device_prototype"]()
+        scope["fix_sia81xx_prototypes"]()
+        scope["mark_esd_worker_unused_locals"]()
     assert project.read_bytes() == before
     assert legacy_project.read_bytes() == legacy_before
     assert drm_path.read_text() == drm
+    assert audio_path.read_text() == audio
+    assert recovery_path.read_text() == recovery
     assert (work / "include/linux/workqueue.h").read_text() == workqueue
     print("vendor compatibility patches: idempotent")
 

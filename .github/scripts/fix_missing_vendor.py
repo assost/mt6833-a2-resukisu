@@ -623,6 +623,53 @@ def fix_drm_device_prototype():
     print("drm: get_drm_device has a void prototype")
 
 
+def fix_sia81xx_prototypes():
+    path = ROOT / "sound/soc/codecs/audio/sia81xx/sia81xx.c"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    changed = text
+    for name in ("sia81xx_start", "sia81xx_stop"):
+        old = f"void {name}(){{"
+        new = f"void {name}(void){{"
+        if new in changed:
+            continue
+        if changed.count(old) != 1:
+            raise SystemExit(f"{name} definition missing or ambiguous")
+        changed = changed.replace(old, new, 1)
+    if changed != text:
+        path.write_text(changed)
+        print("sia81xx: start/stop have void prototypes")
+
+
+def mark_esd_worker_unused_locals():
+    path = ROOT / "drivers/gpu/drm/mediatek/mtk_disp_recovery.c"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    signature = "static int mtk_drm_esd_check_worker_kthread(void *data)\n{"
+    start = text.find(signature)
+    if start < 0:
+        raise SystemExit("ESD worker definition missing")
+    end = text.find("sched_setscheduler(current, SCHED_RR, &param);", start)
+    if end < 0:
+        raise SystemExit("ESD worker declaration boundary missing")
+    declarations = text[start:end]
+    for old, new in (
+        ("struct mtk_ddp_comp *output_comp;", "struct mtk_ddp_comp *output_comp __maybe_unused;"),
+        ("unsigned int prj_id = get_project();", "unsigned int prj_id __maybe_unused = get_project();"),
+    ):
+        if new in declarations:
+            continue
+        if declarations.count(old) != 1:
+            raise SystemExit("ESD worker local declaration missing or ambiguous")
+        declarations = declarations.replace(old, new, 1)
+    changed = text[:start] + declarations + text[end:]
+    if changed != text:
+        path.write_text(changed)
+        print("ESD worker: marked unused locals without dropping initialization")
+
+
 def keep_swappiness_limit():
     path = ROOT / "kernel/sysctl.c"
     if not path.is_file():
@@ -920,6 +967,8 @@ def main():
     write_oplus_project_header()
     write_oppo_project_forward_header()
     fix_drm_device_prototype()
+    fix_sia81xx_prototypes()
+    mark_esd_worker_unused_locals()
     write_healthinfo_ion_header()
     write_oppo_process_header()
     keep_swappiness_limit()
