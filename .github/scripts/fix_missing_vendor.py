@@ -4,6 +4,7 @@
 Commenting out source lines drops endif/endmenu that live in the missing
 file and makes the parent endmenu unexpected. Empty files keep the parse.
 """
+import fnmatch
 import os
 import re
 from pathlib import Path
@@ -21,11 +22,19 @@ UPSTREAM_HEADERS = {
 ROOT = Path(".").resolve()
 
 
+def source_paths(pattern="*"):
+    # Reference clones are inputs, not part of the kernel being repaired.
+    excluded = {".git", ".build-deps"}
+    for directory, directories, files in os.walk(ROOT, followlinks=False):
+        directories[:] = [name for name in directories if name not in excluded]
+        for name in directories + files:
+            if name not in excluded and fnmatch.fnmatch(name, pattern):
+                yield Path(directory) / name
+
+
 def broken_symlinks():
     found = []
-    for path in ROOT.rglob("*"):
-        if ".git" in path.parts:
-            continue
+    for path in source_paths():
         if path.is_symlink() and not path.exists():
             found.append(path)
     return found
@@ -43,8 +52,8 @@ def stub_symlink(path: Path):
 
 
 def ensure_source_targets():
-    for kconfig in ROOT.rglob("Kconfig*"):
-        if ".git" in kconfig.parts or not kconfig.is_file() or kconfig.is_symlink():
+    for kconfig in source_paths("Kconfig*"):
+        if not kconfig.is_file() or kconfig.is_symlink():
             continue
         text = kconfig.read_text(errors="replace")
         for line in text.splitlines():
@@ -67,8 +76,8 @@ def ensure_source_targets():
 
 
 def strip_cr():
-    for path in ROOT.rglob("Kconfig*"):
-        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+    for path in source_paths("Kconfig*"):
+        if not path.is_file() or path.is_symlink():
             continue
         data = path.read_bytes()
         if b"\r" not in data:
@@ -79,8 +88,8 @@ def strip_cr():
 def drop_unbalanced_ends():
     starters = {"menu": "endmenu", "if": "endif", "choice": "endchoice"}
     enders = {v: k for k, v in starters.items()}
-    for path in ROOT.rglob("Kconfig*"):
-        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+    for path in source_paths("Kconfig*"):
+        if not path.is_file() or path.is_symlink():
             continue
         lines = path.read_text(errors="replace").splitlines(keepends=True)
         stack = []
@@ -182,8 +191,8 @@ def restore_standard_headers():
 
 def create_missing_headers():
     created = 0
-    for path in list(ROOT.rglob("*")):
-        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+    for path in list(source_paths()):
+        if not path.is_file() or path.is_symlink():
             continue
         if path.suffix not in {".h", ".c", ".S"}:
             continue
@@ -207,8 +216,8 @@ def create_missing_headers():
 
 def neutralize_sched_assist_macro():
     needle = b"OPLUS_FEATURE_SCHED_ASSIST"
-    for path in ROOT.rglob("*"):
-        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+    for path in source_paths():
+        if not path.is_file() or path.is_symlink():
             continue
         if path.suffix not in {".h", ".c", ".S", ".mk"} and path.name != "Makefile":
             continue
@@ -336,9 +345,8 @@ def _vendor_missing_include(src, spec, quote):
     if _generated_include(spec):
         return False
     candidates = _include_candidates(src, spec, quote)
-    existing = [cand for cand in candidates if cand.is_file()]
-    if existing:
-        hit = existing[0]
+    hit = next((cand for cand in candidates if cand.is_file()), None)
+    if hit is not None:
         return _is_stub_file(hit) or _under_marked_stub(hit)
     if any(_under_marked_stub(cand) for cand in candidates):
         return True
@@ -357,8 +365,11 @@ def _innermost_feature(stack):
 def find_vendor_guard_macros():
     found = set()
     reported = 0
-    for path in ROOT.rglob("*"):
-        if ".git" in path.parts or not path.is_file() or path.is_symlink():
+    # This phase only reads files. Drop cached classifications before later
+    # phases create headers; quoted includes depend on the source directory.
+    include_cache = {}
+    for path in source_paths():
+        if not path.is_file() or path.is_symlink():
             continue
         if path.suffix not in {".h", ".c", ".S"}:
             continue
@@ -376,7 +387,10 @@ def find_vendor_guard_macros():
             if not include:
                 continue
             quote, spec = include.group(1), include.group(2)
-            if not _vendor_missing_include(path, spec, quote):
+            key = (path.parent if quote == '"' else None, spec, quote)
+            if key not in include_cache:
+                include_cache[key] = _vendor_missing_include(path, spec, quote)
+            if not include_cache[key]:
                 continue
             macros = _innermost_feature(stack)
             if macros:
@@ -386,6 +400,28 @@ def find_vendor_guard_macros():
                 print(f"vendor include kept: {path.relative_to(ROOT).as_posix()} -> {spec}")
                 reported += 1
     return found
+
+
+def keep_workqueue_ux_flag():
+    """Keep callers working when the vendor scheduling extension is absent."""
+    path = ROOT / "include/linux/workqueue.h"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    old = "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n\tWQ_UX\t= 1 << 15,\n#endif\n"
+    new = (
+        "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n"
+        "\tWQ_UX\t= 1 << 15,\n"
+        "#else\n"
+        "\tWQ_UX\t= 0,\n"
+        "#endif\n"
+    )
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit("workqueue WQ_UX guard missing")
+    path.write_text(text.replace(old, new, 1))
+    print("workqueue: WQ_UX is zero without sched_assist")
 
 
 def apply_macro_suppression(macros):
@@ -531,9 +567,16 @@ def write_oplus_project_header():
 #ifndef _OPLUS_PROJECT_STUB_H_
 #define _OPLUS_PROJECT_STUB_H_
 #include <linux/types.h>
+/* Engineering IDs from the official MT6833 A2 module source:
+ * vendor/oplus/kernel/system/include/oplus_project_data_ocdt.h,
+ * commit dd93a63de24dec560639b88d8328d4be7100a60d.
+ */
 enum {{
-	RELEASE_VERSION = 0,
-	AGING = 1,
+	RELEASE_VERSION = 0x00,
+	AGING = 0x01,
+	PREVERSION = 0x04,
+	HIGH_TEMP_AGING = 0x0B,
+	FACTORY = 0x0C,
 }};
 static inline unsigned int get_project(void) {{ return 0; }}
 static inline unsigned int is_project(int project) {{ return 0; }}
@@ -842,6 +885,7 @@ def main():
     apply_macro_suppression(macros)
     patch_known_vendor_callers()
     keep_walt_without_sched_assist()
+    keep_workqueue_ux_flag()
     write_oplus_project_header()
     write_healthinfo_ion_header()
     write_oppo_process_header()

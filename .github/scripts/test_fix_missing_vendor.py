@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Run fix_missing_vendor.py on a fixture and check vendor macros are undefined."""
+import contextlib
+import io
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parent / "fix_missing_vendor.py"
 STUB = "stub: vendor source is not in this kernel drop"
+LINK_PLACEHOLDER = b"/* Windows test: broken symlink placeholder */\n"
 
 
 def write(path: Path, text: str):
@@ -15,10 +20,20 @@ def write(path: Path, text: str):
 
 
 def main():
-    work = Path(sys.argv[1])
+    work_arg = Path(sys.argv[1])
+    if work_arg.is_symlink():
+        raise SystemExit("test work directory must not be a symlink")
+    work = work_arg.resolve()
+    workspace = Path.cwd().resolve()
+    if work == workspace or not work.is_relative_to(workspace):
+        raise SystemExit("test work directory must be inside the workspace")
+    marker = work / ".vendor-test-work"
     if work.exists():
+        if not marker.is_file():
+            raise SystemExit("refusing to remove a directory not created by this test")
         shutil.rmtree(work)
     work.mkdir(parents=True)
+    marker.write_text("fix_missing_vendor test workspace\n")
     real_mk = Path(sys.argv[2]) if len(sys.argv) > 2 else None
     if real_mk is not None:
         write(work / "OplusKernelEnvConfig.mk", real_mk.read_text(encoding="utf-8"))
@@ -53,6 +68,15 @@ endif
 """,
         )
     write(work / "Makefile", "KBUILD_CFLAGS += -Wall\n")
+    if len(sys.argv) > 3:
+        workqueue_header = Path(sys.argv[3]).read_text()
+    else:
+        workqueue_header = (
+            "enum {\n\tWQ_UNBOUND = 1 << 1,\n\tWQ_HIGHPRI = 1 << 4,\n"
+            "#ifdef OPLUS_FEATURE_SCHED_ASSIST\n\tWQ_UX\t= 1 << 15,\n#endif\n"
+            "\t__WQ_DRAINING = 1 << 16,\n};\n"
+        )
+    write(work / "include/linux/workqueue.h", workqueue_header)
     write(
         work / "arch/arm64/configs/k6833v1_64_k419_defconfig",
         "\n".join(
@@ -234,6 +258,38 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
 	struct page *page, void *object, unsigned long addr) { return 0; }
 """,
     )
+    excluded_files = {}
+    excluded_links = []
+    for excluded_name in (".build-deps", ".git"):
+        directory = work / excluded_name / "reference"
+        directory.mkdir(parents=True)
+        kconfig = directory / "Kconfig"
+        kconfig.write_bytes(
+            f'source "{excluded_name}/reference/generated/Kconfig"\r\n'.encode()
+        )
+        source = directory / "vendor.c"
+        source.write_bytes(
+            b"#define OPLUS_FEATURE_SCHED_ASSIST\r\n"
+            b"#ifdef OPLUS_FEATURE_DEPS_ONLY\r\n"
+            b"#include <linux/oplus_missing_reference.h>\r\n#endif\r\n"
+        )
+        excluded_files[kconfig] = kconfig.read_bytes()
+        excluded_files[source] = source.read_bytes()
+        link = directory / "broken.c"
+        if os.name == "nt":
+            link.write_bytes(LINK_PLACEHOLDER)
+        else:
+            link.symlink_to("missing-reference.c")
+        excluded_links.append(link)
+    normal_link = work / "normal/broken.c"
+    normal_link.parent.mkdir()
+    if os.name == "nt":
+        normal_link.write_bytes(LINK_PLACEHOLDER)
+    else:
+        normal_link.symlink_to("missing-normal.c")
+    normal_kconfig = work / "normal/Kconfig"
+    normal_kconfig.write_bytes(b'source "normal/generated/Kconfig"\r\n')
+    check_source_pruning(work, normal_link, excluded_links)
     proc = subprocess.run(
         [sys.executable, str(SCRIPT)],
         cwd=work,
@@ -297,6 +353,20 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
         raise SystemExit("vdso linker flag was not updated")
     if "suppressed vendor macros: 2" not in proc.stdout:
         raise SystemExit("expected exactly the two baseline vendor macros")
+    for path, before in excluded_files.items():
+        assert path.read_bytes() == before, f"reference input modified: {path}"
+    for link in excluded_links:
+        if os.name == "nt":
+            assert link.read_bytes() == LINK_PLACEHOLDER
+        else:
+            assert link.is_symlink() and not link.exists(), f"reference symlink modified: {link}"
+            assert link.readlink() == Path("missing-reference.c")
+        assert not (link.parent / "generated/Kconfig").exists()
+    assert "OPLUS_FEATURE_DEPS_ONLY" not in makefile + env
+    assert not normal_link.is_symlink() and STUB in normal_link.read_text()
+    assert b"\r" not in normal_kconfig.read_bytes()
+    assert STUB in (work / "normal/generated/Kconfig").read_text()
+    print("source scan exclusions: reference links/Kconfig/includes untouched; normal repairs passed")
     if "vendor include kept:" not in proc.stdout:
         raise SystemExit("broad-guarded vendor include was not reported")
     core = (work / "kernel/sched/core.c").read_text(encoding="utf-8")
@@ -356,6 +426,154 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     if "oppo_is_android_core_group" not in process or "is_critial_process" not in process or "is_key_process" not in process:
         raise SystemExit("oppo_process stub missing")
     print("vendor macro suppression ok")
+    check_vendor_compat(work)
+    check_include_cache(work)
+
+
+def check_source_pruning(work, normal_link, excluded_links):
+    scope = {"__name__": "vendor_source_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    scope["ROOT"] = work
+    original_scandir = os.scandir
+    original_exists = Path.exists
+    original_is_symlink = Path.is_symlink
+    mock_links = {normal_link, *excluded_links}
+
+    def guarded_scandir(path):
+        assert not ({".git", ".build-deps"} & set(Path(path).relative_to(work).parts))
+        return original_scandir(path)
+
+    def emulated_link(path):
+        return path in mock_links and original_exists(path) and path.read_bytes() == LINK_PLACEHOLDER
+
+    def is_symlink(path):
+        return emulated_link(path) or original_is_symlink(path)
+
+    def exists(path):
+        return not emulated_link(path) and original_exists(path)
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(os, "scandir", guarded_scandir))
+        if os.name == "nt":
+            stack.enter_context(mock.patch.object(Path, "is_symlink", is_symlink))
+            stack.enter_context(mock.patch.object(Path, "exists", exists))
+        paths = list(scope["source_paths"]())
+        assert normal_link in paths and not any(link in paths for link in excluded_links)
+        assert scope["broken_symlinks"]() == [normal_link]
+        if os.name == "nt":
+            scope["stub_symlink"](normal_link)
+    mode = "mocked broken links on Windows" if os.name == "nt" else "native broken links"
+    print(f"source pruning: no descent into reference directories; {mode} passed")
+
+
+def check_vendor_compat(work):
+    workqueue = (work / "include/linux/workqueue.h").read_text()
+    position = workqueue.index("WQ_UX")
+    start = workqueue.rfind("enum {", 0, position)
+    end = workqueue.index("};", position) + 2
+    if start < 0:
+        raise SystemExit("WQ_UX workqueue enum was not found")
+    enum_source = workqueue[start:end]
+    write(work / "include/linux/types.h", "#include <stdbool.h>\n")
+    source = '#include <soc/oplus/system/oplus_project.h>\n' + enum_source + r'''
+_Static_assert(RELEASE_VERSION == 0x00 && AGING == 0x01 && PREVERSION == 0x04 &&
+               HIGH_TEMP_AGING == 0x0B && FACTORY == 0x0C, "official engineering IDs changed");
+#ifdef OPLUS_FEATURE_SCHED_ASSIST
+_Static_assert(WQ_UX == (1 << 15), "vendor-enabled flag changed");
+_Static_assert((WQ_HIGHPRI | WQ_UNBOUND | WQ_UX) == ((1 << 4) | (1 << 1) | (1 << 15)), "enabled Mali flags changed");
+#else
+_Static_assert(WQ_UX == 0, "disabled vendor extension is not neutral");
+_Static_assert((WQ_HIGHPRI | WQ_UNBOUND | WQ_UX) == ((1 << 4) | (1 << 1)), "Mali stock flags changed");
+#endif
+int main(void) {
+    return get_eng_version() != RELEASE_VERSION || get_eng_version() == AGING ||
+           get_eng_version() == PREVERSION || get_eng_version() == HIGH_TEMP_AGING ||
+           get_eng_version() == FACTORY;
+}
+'''
+    c_file = work / "vendor_compat.c"
+    write(c_file, source)
+    compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+    if not compiler:
+        raise SystemExit("a host C compiler is required for vendor compatibility checks")
+    for enabled in (False, True):
+        name = "vendor_enabled" if enabled else "vendor_disabled"
+        executable = work / (name + (".exe" if os.name == "nt" else ""))
+        command = [compiler, "-std=gnu11", "-Wall", "-Werror", "-I", str(work / "include")]
+        if enabled:
+            command.append("-DOPLUS_FEATURE_SCHED_ASSIST=1")
+        command.extend([str(c_file), "-o", str(executable)])
+        result = subprocess.run(command, cwd=work, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+        subprocess.run([str(executable)], cwd=work, check=True, timeout=15)
+        print(f"{name}: compiled and release behavior passed")
+    scope = {"__name__": "vendor_compat_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    scope["ROOT"] = work
+    project = work / "include/soc/oplus/system/oplus_project.h"
+    before = project.read_bytes()
+    with contextlib.redirect_stdout(io.StringIO()):
+        scope["keep_workqueue_ux_flag"]()
+        scope["write_oplus_project_header"]()
+    assert project.read_bytes() == before
+    assert (work / "include/linux/workqueue.h").read_text() == workqueue
+    print("vendor compatibility patches: idempotent")
+
+
+def check_include_cache(work):
+    scope = {"__name__": "vendor_cache_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    root = work / "cache-fixture"
+    root.mkdir()
+    scope["ROOT"] = root
+    present = root / "include/linux/present.h"
+    write(present, "/* existing public header */\n" * 20)
+    common = (
+        "#ifdef OPLUS_FEATURE_EXISTING\n#include <linux/present.h>\n#endif\n"
+        "#ifdef OPLUS_FEATURE_MISSING\n#include <linux/oplus_missing.h>\n#endif\n"
+    )
+    write(root / "left/a.c", common * 20 +
+          '#ifdef OPLUS_FEATURE_LOCAL_PRESENT\n#include "oplus_local.h"\n#endif\n')
+    write(root / "right/b.c", common * 20 +
+          '#ifdef OPLUS_FEATURE_LOCAL_MISSING\n#include "oplus_local.h"\n#endif\n')
+    write(root / "left/oplus_local.h", "/* real local header */\n" * 20)
+    original = scope["_vendor_missing_include"]
+    calls = []
+
+    def counted(src, spec, quote):
+        calls.append((src.parent, spec, quote))
+        return original(src, spec, quote)
+
+    scope["_vendor_missing_include"] = counted
+    with contextlib.redirect_stdout(io.StringIO()):
+        actual = scope["find_vendor_guard_macros"]()
+    assert actual == {"OPLUS_FEATURE_MISSING", "OPLUS_FEATURE_LOCAL_MISSING"}, actual
+    assert len(calls) == 4, calls
+    # A new phase must observe changed files instead of reusing stale entries.
+    write(present, f"/* {STUB} */\n")
+    calls.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        changed = scope["find_vendor_guard_macros"]()
+    assert changed == actual | {"OPLUS_FEATURE_EXISTING"}, changed
+    assert len(calls) == 4, calls
+
+    class Candidate:
+        def __init__(self, exists):
+            self.exists = exists
+            self.calls = 0
+
+        def is_file(self):
+            self.calls += 1
+            return self.exists
+
+    first, second = Candidate(True), Candidate(True)
+    scope["_include_candidates"] = lambda *args: [first, second]
+    scope["_is_stub_file"] = lambda path: False
+    scope["_under_marked_stub"] = lambda path: False
+    assert original(root / "sample.c", "linux/present.h", "<") is False
+    assert first.calls == 1 and second.calls == 0
+    print("include cache: 82 includes / 4 classifications, quoted scope, invalidation and candidate short-circuit passed")
 
 
 if __name__ == "__main__":
