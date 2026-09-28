@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Drive port_susfs_full against the real A2 sources and check the call sites."""
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,8 @@ if work.exists():
         raise SystemExit("refusing to remove a directory not created by this test")
     shutil.rmtree(work)
 shutil.copytree(fixture, work)
+if len(sys.argv) > 3:
+    shutil.copyfile(Path(sys.argv[3]).resolve(), work / "include/linux/susfs_def.h")
 marker.write_text("port_susfs_full test workspace\n")
 script = HERE / "port_susfs_full.py"
 proc = subprocess.run([sys.executable, str(script)], cwd=work, text=True, capture_output=True)
@@ -267,6 +270,98 @@ int main(void) {
 compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
 if not compiler:
     raise SystemExit("a host C compiler is required for the pagemap regression test")
+
+
+
+def check_command_ids():
+    expected = {
+        "CMD_SUSFS_ADD_SUS_PATH_LOOP": 0x55553,
+        "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS": 0x55561,
+        "CMD_SUSFS_ADD_SUS_MAP": 0x60020,
+        "CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING": 0x60010,
+    }
+    if len(sys.argv) > 4:
+        reference = Path(sys.argv[4]).read_text()
+        for name, value in expected.items():
+            match = re.search(r"(?m)^#define " + name + r"\s+(0x[0-9a-fA-F]+)\b", reference)
+            assert match and int(match.group(1), 16) == value, name
+        print("SUSFS command IDs match the supplied upstream ABI header")
+    rel = "include/linux/susfs_def.h"
+    generated = (work / rel).read_text()
+    without_commands = generated
+    for name in expected:
+        without_commands, count = re.subn(
+            r"#ifndef " + name + r"\n#define " + name + r" [^\n]+\n#endif\n",
+            "", without_commands,
+        )
+        assert count == 1, name
+    assert "AS_FLAGS_SUS_MAP" in without_commands
+    custom_values = {name: value + 0x100000 for name, value in expected.items()}
+    custom_defines = "".join(f"#define {name} {value:#x}\n" for name, value in custom_values.items())
+    custom = without_commands.replace("#define KSU_SUSFS_DEF_H\n",
+                                      "#define KSU_SUSFS_DEF_H\n" + custom_defines, 1)
+    cases = [("generated", generated, expected),
+             ("map_already_present", without_commands, expected),
+             ("existing_values", custom, custom_values)]
+    for name, header_text, values in cases:
+        case = work / "command-header-cases" / name
+        for source_rel, data in first_pass.items():
+            destination = case / source_rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        header = case / rel
+        header.write_text(header_text, encoding="utf-8", newline="\n")
+        result = subprocess.run([sys.executable, str(script)], cwd=case, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+        after = header.read_text()
+        for command in expected:
+            assert after.count("#ifndef " + command + "\n") == 1, command
+        assert after.count("#define AS_FLAGS_SUS_MAP 39") == 1
+        assert after.count("struct st_susfs_sus_map {") == 1
+        if name == "existing_values":
+            assert custom_defines in after
+        assert all((case / source_rel).read_bytes() == data
+                   for source_rel, data in first_pass.items() if source_rel != rel)
+        snapshot = header.read_bytes()
+        subprocess.run([sys.executable, str(script)], cwd=case, check=True, capture_output=True)
+        assert header.read_bytes() == snapshot
+        for stub_name in ("bits.h", "bitops.h"):
+            (case / "include/linux" / stub_name).write_text("#define BIT(n) (1UL << (n))\n")
+        unit = case / "command_ids.c"
+        includes = "#include <linux/susfs_def.h>\n#include <linux/susfs_def.h>\n"
+        unit.write_text(includes)
+        base = [compiler, "-std=gnu11", "-Wall", "-Werror", "-I", str(case / "include")]
+        macros = subprocess.run(base + ["-E", "-dM", str(unit)], capture_output=True, text=True)
+        if macros.returncode:
+            raise SystemExit(macros.stdout + macros.stderr)
+        command_macros = dict(re.findall(r"(?m)^#define (CMD_SUSFS_\w+) ([^\n]+)$", macros.stdout))
+        for command, value in values.items():
+            assert int(command_macros[command], 0) == value, command
+        assertions = "".join(f'_Static_assert({command} == {value:#x}, "{command}");\n'
+                             for command, value in values.items())
+        switch_cases = "".join(f"case {command}: return {index};\n"
+                               for index, command in enumerate(sorted(command_macros), 1))
+        behavior = " || ".join(f"dispatch({command}) != {index}"
+                               for index, command in enumerate(sorted(command_macros), 1))
+        unit.write_text(includes + assertions +
+                        "static int dispatch(unsigned int command) { switch (command) {\n" +
+                        switch_cases + "default: return 0; } }\nint main(void) { return " +
+                        behavior + "; }\n")
+        executable = case / ("command_ids.exe" if os.name == "nt" else "command_ids")
+        build = subprocess.run(base + [str(unit), "-o", str(executable)], capture_output=True, text=True)
+        if build.returncode:
+            raise SystemExit(build.stdout + build.stderr)
+        subprocess.run([str(executable)], check=True, timeout=15)
+        guarded = subprocess.run(base + ["-DKSU_SUSFS_DEF_H", "-E", "-dM", str(unit)],
+                                 capture_output=True, text=True)
+        assert guarded.returncode == 0, guarded.stderr
+        assert not any(re.search(r"(?m)^#define " + command + r"\b", guarded.stdout)
+                       for command in expected), "command definitions escaped the header guard"
+        print(f"SUSFS {name}: macro values, {len(command_macros)} switch cases, header guard and idempotence PASS")
+
+
+check_command_ids()
 
 
 def replay(name, read_source, enabled=True, should_pass=True):

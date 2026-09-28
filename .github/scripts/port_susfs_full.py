@@ -17,6 +17,21 @@ def must_replace(rel, old, new):
 
 header = ROOT / "include/linux/susfs_def.h"
 body = header.read_text()
+original_body = body
+command_ids = {
+    "CMD_SUSFS_ADD_SUS_PATH_LOOP": "0x55553",
+    "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS": "0x55561",
+    "CMD_SUSFS_ADD_SUS_MAP": "0x60020",
+    "CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING": "0x60010",
+}
+# Userspace command ABI from the Android 12 / 5.10 SUSFS definitions.
+footer = "#endif // #ifndef KSU_SUSFS_DEF_H"
+if body.count(footer) != 1:
+    raise SystemExit("SUSFS definition header guard footer missing or ambiguous")
+for name, value in command_ids.items():
+    block = f"#ifndef {name}\n#define {name} {value}\n#endif\n"
+    if block not in body:
+        body = body.replace(footer, block + footer, 1)
 if "AS_FLAGS_SUS_MAP" not in body:
     body = body.replace(
         "#endif // #ifndef KSU_SUSFS_DEF_H",
@@ -34,6 +49,7 @@ struct st_susfs_sus_map {
 #endif // #ifndef KSU_SUSFS_DEF_H
 """,
     )
+if body != original_body:
     header.write_text(body)
 
 must_replace(
