@@ -461,6 +461,7 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     recovery_after = recovery_after.replace("prj_id __maybe_unused = get_project();", "prj_id = get_project();", 1)
     assert recovery_after == recovery_source, "unrelated ESD source or initializer changed"
     check_vendor_compat(work)
+    check_panel_project_fallbacks(work)
     check_include_cache(work)
 
 
@@ -616,6 +617,88 @@ int main(void) {
     assert recovery_path.read_text() == recovery
     assert (work / "include/linux/workqueue.h").read_text() == workqueue
     print("vendor compatibility patches: idempotent")
+
+
+
+def check_panel_project_fallbacks(work):
+    scope = {"__name__": "panel_project_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    root = work / "panel-project-fixture"
+    scope["ROOT"] = root
+    fallback = "extern unsigned int __attribute((weak)) is_project(int project)  { return 0; }"
+    if len(sys.argv) > 7:
+        source = Path(sys.argv[7]).read_bytes()
+    else:
+        source = ("#include <soc/oplus/system/oplus_project.h>\n" + fallback +
+                  "\nextern int __attribute((weak)) other_fallback(void) { return 7; }\n").encode()
+    assert fallback.encode() in source
+    panel = root / "drivers/gpu/drm/panel/confirmed.c"
+    panel.parent.mkdir(parents=True)
+    panel.write_bytes(source)
+    crlf_panel = panel.with_name("same_fallback_crlf.c")
+    crlf_source = (fallback + "\r\n").encode()
+    crlf_panel.write_bytes(crlf_source)
+    unchanged = {
+        panel.with_name("nonzero.c"): fallback.replace("return 0;", "return 1;"),
+        panel.with_name("other_signature.c"): fallback.replace("int project)", "int project_id)"),
+        panel.with_suffix(".h"): fallback,
+        root / "drivers/gpu/drm/other.c": fallback,
+    }
+    for path, content in unchanged.items():
+        write(path, content + "\n")
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    scope["guard_panel_project_fallbacks"]()
+    for path in (panel, crlf_panel):
+        newline = b"\r\n" if b"\r\n" in before[path] else b"\n"
+        guarded = b"#ifndef _OPLUS_PROJECT_STUB_H_" + newline + fallback.encode() + newline + b"#endif"
+        assert path.read_bytes().count(guarded) == 1
+        assert path.read_bytes().replace(guarded, fallback.encode(), 1) == before[path], path
+    for path in unchanged:
+        assert path.read_bytes() == before[path], path
+    after = {path: path.read_bytes() for path in before}
+    scope["guard_panel_project_fallbacks"]()
+    assert all(path.read_bytes() == content for path, content in after.items())
+    print("panel fallback: exact zero definition only, unrelated files and CRLF preserved, idempotent")
+
+    stub_include = root / "stub/include"
+    real_include = root / "real/include"
+    write(stub_include / "linux/types.h", "#include <stdbool.h>\n")
+    write(stub_include / "soc/oplus/system/oplus_project.h",
+          (work / "include/soc/oplus/system/oplus_project.h").read_text())
+    write(real_include / "soc/oplus/system/oplus_project.h",
+          "extern unsigned int is_project(int project);\n")
+    patched = panel.read_text()
+    start = patched.index("#ifndef _OPLUS_PROJECT_STUB_H_\n" + fallback)
+    end = patched.index("#endif", start) + len("#endif")
+    source = ("#include <soc/oplus/system/oplus_project.h>\n" + patched[start:end] +
+              "\n#ifndef EXPECT_REAL\n#define EXPECT_REAL 0\n#endif\n"
+              "int main(void) { return is_project(22083) != EXPECT_REAL || is_project(-1) != 0; }\n")
+    translation_unit = root / "panel_project.c"
+    write(translation_unit, source)
+    strong = root / "real_project.c"
+    write(strong, "unsigned int is_project(int project) { return project == 22083; }\n")
+    compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+    if not compiler:
+        raise SystemExit("a host C compiler is required for panel project checks")
+    for mode, include in (("stub", stub_include), ("real_fallback", real_include),
+                          ("real_override", real_include)):
+        executable = root / (mode + (".exe" if os.name == "nt" else ""))
+        command = [compiler, "-std=gnu11", "-Wall", "-Wstrict-prototypes", "-Werror",
+                   "-I", str(include), str(translation_unit)]
+        if mode == "real_override":
+            command.extend(["-DEXPECT_REAL=1", str(strong)])
+        command.extend(["-o", str(executable)])
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+        subprocess.run([str(executable)], check=True, timeout=15)
+        print(f"panel {mode}: strict compilation and is_project behavior passed")
+    mutant = root / "panel_project_unguarded.c"
+    write(mutant, source.replace(patched[start:end], fallback, 1))
+    result = subprocess.run([compiler, "-std=gnu11", "-fsyntax-only", "-I", str(stub_include),
+                             str(mutant)], capture_output=True, text=True)
+    assert result.returncode != 0 and "is_project" in result.stderr and "redefinition" in result.stderr
+    print("panel fallback: original stub redefinition reproduced and rejected")
 
 
 def check_include_cache(work):

@@ -592,6 +592,29 @@ static inline bool oplus_daily_build(void) {{ return false; }}
     print("stub include/soc/oplus/system/oplus_project.h")
 
 
+
+def guard_panel_project_fallbacks():
+    directory = ROOT / "drivers/gpu/drm/panel"
+    fallback = b"extern unsigned int __attribute((weak)) is_project(int project)  { return 0; }"
+    pattern = re.compile(rb"(?m)^" + re.escape(fallback) + rb"(?=\r?$)")
+    for path in sorted(directory.glob("*.c")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        original = path.read_bytes()
+        changed = original
+        for match in reversed(list(pattern.finditer(original))):
+            newline = b"\r\n" if original[match.end():match.end() + 2] == b"\r\n" else b"\n"
+            guard = b"#ifndef _OPLUS_PROJECT_STUB_H_" + newline
+            if original[max(0, match.start() - len(guard)):match.start()] == guard:
+                continue
+            # The generated header already supplies the same zero fallback.
+            replacement = guard + fallback + newline + b"#endif"
+            changed = changed[:match.start()] + replacement + changed[match.end():]
+        if changed != original:
+            path.write_bytes(changed)
+            print(f"panel: guarded zero project fallback in {path.relative_to(ROOT).as_posix()}")
+
+
 def write_oppo_project_forward_header():
     path = ROOT / "include/soc/oplus/system/oppo_project.h"
     if path.is_file() and STUB_MARK not in path.read_text(errors="replace"):
@@ -965,6 +988,7 @@ def main():
     keep_walt_without_sched_assist()
     keep_workqueue_ux_flag()
     write_oplus_project_header()
+    guard_panel_project_fallbacks()
     write_oppo_project_forward_header()
     fix_drm_device_prototype()
     fix_sia81xx_prototypes()
