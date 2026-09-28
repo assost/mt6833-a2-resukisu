@@ -58,7 +58,7 @@ jobs:
 
       - name: Build
         run: |
-          set -eux
+          set -euxo pipefail
           export ARCH=arm64
           export SUBARCH=arm64
           export LLVM=1
@@ -74,13 +74,29 @@ jobs:
           export STRIP=llvm-strip
           export HOSTCC=clang
           export HOSTLD=ld.lld
+          # Legacy vendor code sets diagnostic-only locals; keep these warnings non-fatal.
+          export KCFLAGS="-Wno-error=unused-but-set-variable"
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           make O=out k6833v1_64_k419_defconfig
+          cp out/.config out/kernel.config
+          {
+            git rev-parse HEAD
+            git -C KernelSU rev-parse HEAD
+            for source in mm/memory.c fs/proc/task_mmu.c; do
+              grep -n "SUSFS_IS_INODE_SUS_MAP" "$source"
+            done
+            grep -n "susfs_is_avc_log_spoofing_enabled" security/selinux/avc.c
+          } > out/integration-evidence.txt
           grep -E 'CONFIG_KSU|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG|CONFIG_OPLUS_ROOT_CHECK' out/.config
           test "$(grep -c '^CONFIG_LTO_CLANG=y$' out/.config)" = 1
           test "$(grep -c '^CONFIG_CFI_CLANG=y$' out/.config)" = 1
           test "$(grep -c '^CONFIG_KSU_SUSFS=y$' out/.config)" = 1
-          make O=out -j2
+          test "$(grep -c '^CONFIG_KSU=y$' out/.config)" = 1
+          test "$(grep -c '^CONFIG_KSU_SUSFS_SUS_MAP=y$' out/.config)" = 1
+          ! grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config
+          make O=out -j2 2>&1 | tee out/build.log
+          test "$(stat -c %s out/arch/arm64/boot/Image.gz-dtb)" -gt 1048576
+          sha256sum out/arch/arm64/boot/Image.gz-dtb > out/kernel.sha256
           ls -lh out/arch/arm64/boot/Image.gz-dtb
 
       - name: Upload kernel
@@ -90,5 +106,8 @@ jobs:
           name: a2-kernel-log
           path: |
             out/arch/arm64/boot/Image.gz-dtb
-            out/.config
+            out/kernel.config
+            out/build.log
+            out/integration-evidence.txt
+            out/kernel.sha256
           if-no-files-found: warn
