@@ -275,6 +275,7 @@ if not compiler:
 
 def check_command_ids():
     expected = {
+        "SUSFS_MAGIC": 0xFAFAFAFA,
         "CMD_SUSFS_ADD_SUS_PATH_LOOP": 0x55553,
         "CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS": 0x55561,
         "CMD_SUSFS_ADD_SUS_MAP": 0x60020,
@@ -285,7 +286,7 @@ def check_command_ids():
         for name, value in expected.items():
             match = re.search(r"(?m)^#define " + name + r"\s+(0x[0-9a-fA-F]+)\b", reference)
             assert match and int(match.group(1), 16) == value, name
-        print("SUSFS command IDs match the supplied upstream ABI header")
+        print("SUSFS command IDs and magic match the supplied upstream ABI header")
     rel = "include/linux/susfs_def.h"
     generated = (work / rel).read_text()
     without_commands = generated
@@ -335,16 +336,18 @@ def check_command_ids():
         macros = subprocess.run(base + ["-E", "-dM", str(unit)], capture_output=True, text=True)
         if macros.returncode:
             raise SystemExit(macros.stdout + macros.stderr)
-        command_macros = dict(re.findall(r"(?m)^#define (CMD_SUSFS_\w+) ([^\n]+)$", macros.stdout))
+        abi_macros = dict(re.findall(r"(?m)^#define ((?:CMD_)?SUSFS_\w+) ([^\n]+)$", macros.stdout))
+        command_macros = {name: value for name, value in abi_macros.items() if name.startswith("CMD_")}
         for command, value in values.items():
-            assert int(command_macros[command], 0) == value, command
+            assert int(abi_macros[command], 0) == value, command
         assertions = "".join(f'_Static_assert({command} == {value:#x}, "{command}");\n'
                              for command, value in values.items())
         switch_cases = "".join(f"case {command}: return {index};\n"
                                for index, command in enumerate(sorted(command_macros), 1))
-        behavior = " || ".join(f"dispatch({command}) != {index}"
+        behavior = "!valid_magic(SUSFS_MAGIC) || valid_magic(SUSFS_MAGIC ^ 1U) || " + " || ".join(f"dispatch({command}) != {index}"
                                for index, command in enumerate(sorted(command_macros), 1))
         unit.write_text(includes + assertions +
+                        "static int valid_magic(unsigned int magic) { return magic == SUSFS_MAGIC; }\n" +
                         "static int dispatch(unsigned int command) { switch (command) {\n" +
                         switch_cases + "default: return 0; } }\nint main(void) { return " +
                         behavior + "; }\n")
@@ -358,7 +361,7 @@ def check_command_ids():
         assert guarded.returncode == 0, guarded.stderr
         assert not any(re.search(r"(?m)^#define " + command + r"\b", guarded.stdout)
                        for command in expected), "command definitions escaped the header guard"
-        print(f"SUSFS {name}: macro values, {len(command_macros)} switch cases, header guard and idempotence PASS")
+        print(f"SUSFS {name}: macro values and magic, {len(command_macros)} switch cases, header guard and idempotence PASS")
 
 
 check_command_ids()
