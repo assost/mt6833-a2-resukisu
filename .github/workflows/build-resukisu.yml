@@ -74,8 +74,8 @@ jobs:
           export STRIP=llvm-strip
           export HOSTCC=clang
           export HOSTLD=ld.lld
-          # Legacy vendor code sets diagnostic-only locals; keep these warnings non-fatal.
-          export KCFLAGS="-Wno-error=unused-but-set-variable"
+          # Preserve diagnostics from legacy vendor/configuration-dependent code.
+          export KCFLAGS="-Wno-error=unused-but-set-variable -Wno-error=strict-prototypes -Wno-error=unused-variable -Wno-error=unused-function"
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           make O=out k6833v1_64_k419_defconfig
           cp out/.config out/kernel.config
