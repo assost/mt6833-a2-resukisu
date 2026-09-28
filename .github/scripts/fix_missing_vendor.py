@@ -592,6 +592,37 @@ static inline bool oplus_daily_build(void) {{ return false; }}
     print("stub include/soc/oplus/system/oplus_project.h")
 
 
+def write_oppo_project_forward_header():
+    path = ROOT / "include/soc/oplus/system/oppo_project.h"
+    if path.is_file() and STUB_MARK not in path.read_text(errors="replace"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"/* {STUB_MARK} */\n"
+        "#ifndef _OPPO_PROJECT_FORWARD_H_\n"
+        "#define _OPPO_PROJECT_FORWARD_H_\n"
+        "#include <soc/oplus/system/oplus_project.h>\n"
+        "#endif\n",
+        encoding="utf-8",
+    )
+    print("forward include/soc/oplus/system/oppo_project.h")
+
+
+def fix_drm_device_prototype():
+    path = ROOT / "drivers/gpu/drm/mediatek/mtk_debug.c"
+    if not path.is_file():
+        return
+    text = path.read_text()
+    old = "struct drm_device *get_drm_device(){"
+    new = "struct drm_device *get_drm_device(void){"
+    if new in text:
+        return
+    if old not in text:
+        raise SystemExit("get_drm_device definition missing")
+    path.write_text(text.replace(old, new, 1))
+    print("drm: get_drm_device has a void prototype")
+
+
 def keep_swappiness_limit():
     path = ROOT / "kernel/sysctl.c"
     if not path.is_file():
@@ -887,6 +918,8 @@ def main():
     keep_walt_without_sched_assist()
     keep_workqueue_ux_flag()
     write_oplus_project_header()
+    write_oppo_project_forward_header()
+    fix_drm_device_prototype()
     write_healthinfo_ion_header()
     write_oppo_process_header()
     keep_swappiness_limit()

@@ -77,6 +77,14 @@ endif
             "\t__WQ_DRAINING = 1 << 16,\n};\n"
         )
     write(work / "include/linux/workqueue.h", workqueue_header)
+    if len(sys.argv) > 4:
+        drm_source = Path(sys.argv[4]).read_text()
+    else:
+        drm_source = (
+            "struct drm_device *get_drm_device(){\n"
+            "    return drm_dev;\n}\nEXPORT_SYMBOL(get_drm_device);\n"
+        )
+    write(work / "drivers/gpu/drm/mediatek/mtk_debug.c", drm_source)
     write(
         work / "arch/arm64/configs/k6833v1_64_k419_defconfig",
         "\n".join(
@@ -474,8 +482,20 @@ def check_vendor_compat(work):
     if start < 0:
         raise SystemExit("WQ_UX workqueue enum was not found")
     enum_source = workqueue[start:end]
+    drm_path = work / "drivers/gpu/drm/mediatek/mtk_debug.c"
+    drm = drm_path.read_text()
+    start = drm.index("struct drm_device *get_drm_device(")
+    end = drm.index("}", start) + 1
+    drm_function = drm[start:end]
     write(work / "include/linux/types.h", "#include <stdbool.h>\n")
-    source = '#include <soc/oplus/system/oplus_project.h>\n' + enum_source + r'''
+    source = (
+        "#include <soc/oplus/system/oppo_project.h>\n"
+        "#include <soc/oplus/system/oppo_project.h>\n"
+        "extern unsigned int get_PCB_Version(void);\n"
+        "struct drm_device { int id; };\n"
+        "static struct drm_device device;\n"
+        "static struct drm_device *drm_dev = &device;\n"
+    ) + drm_function + "\n" + enum_source + r'''
 _Static_assert(RELEASE_VERSION == 0x00 && AGING == 0x01 && PREVERSION == 0x04 &&
                HIGH_TEMP_AGING == 0x0B && FACTORY == 0x0C, "official engineering IDs changed");
 #ifdef OPLUS_FEATURE_SCHED_ASSIST
@@ -488,7 +508,8 @@ _Static_assert((WQ_HIGHPRI | WQ_UNBOUND | WQ_UX) == ((1 << 4) | (1 << 1)), "Mali
 int main(void) {
     return get_eng_version() != RELEASE_VERSION || get_eng_version() == AGING ||
            get_eng_version() == PREVERSION || get_eng_version() == HIGH_TEMP_AGING ||
-           get_eng_version() == FACTORY;
+           get_eng_version() == FACTORY || get_PCB_Version() != 0 ||
+           get_drm_device() != drm_dev;
 }
 '''
     c_file = work / "vendor_compat.c"
@@ -499,7 +520,7 @@ int main(void) {
     for enabled in (False, True):
         name = "vendor_enabled" if enabled else "vendor_disabled"
         executable = work / (name + (".exe" if os.name == "nt" else ""))
-        command = [compiler, "-std=gnu11", "-Wall", "-Werror", "-I", str(work / "include")]
+        command = [compiler, "-std=gnu11", "-Wall", "-Wstrict-prototypes", "-Werror", "-I", str(work / "include")]
         if enabled:
             command.append("-DOPLUS_FEATURE_SCHED_ASSIST=1")
         command.extend([str(c_file), "-o", str(executable)])
@@ -507,16 +528,30 @@ int main(void) {
         if result.returncode:
             raise SystemExit(result.stdout + result.stderr)
         subprocess.run([str(executable)], cwd=work, check=True, timeout=15)
-        print(f"{name}: compiled and release behavior passed")
+        print(f"{name}: strict prototypes, legacy include, release and DRM pointer behavior passed")
+    mutant = work / "legacy_prototype_mutant.c"
+    write(mutant, source.replace("get_drm_device(void)", "get_drm_device()"))
+    command = [compiler, "-std=gnu11", "-Wstrict-prototypes", "-Werror", "-fsyntax-only",
+               "-I", str(work / "include"), str(mutant)]
+    result = subprocess.run(command, cwd=work, capture_output=True, text=True)
+    if result.returncode == 0:
+        raise SystemExit("strict-prototypes regression was not rejected")
+    print("legacy DRM prototype regression rejected")
     scope = {"__name__": "vendor_compat_test"}
     exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
     scope["ROOT"] = work
     project = work / "include/soc/oplus/system/oplus_project.h"
+    legacy_project = work / "include/soc/oplus/system/oppo_project.h"
     before = project.read_bytes()
+    legacy_before = legacy_project.read_bytes()
     with contextlib.redirect_stdout(io.StringIO()):
         scope["keep_workqueue_ux_flag"]()
         scope["write_oplus_project_header"]()
+        scope["write_oppo_project_forward_header"]()
+        scope["fix_drm_device_prototype"]()
     assert project.read_bytes() == before
+    assert legacy_project.read_bytes() == legacy_before
+    assert drm_path.read_text() == drm
     assert (work / "include/linux/workqueue.h").read_text() == workqueue
     print("vendor compatibility patches: idempotent")
 
