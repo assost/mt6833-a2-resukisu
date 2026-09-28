@@ -84,27 +84,37 @@ must_replace(
 
 must_replace(
     "fs/proc/task_mmu.c",
-    """		ret = down_read_killable(&mm->mmap_sem);
-		if (ret)
-			goto out_free;
-		ret = walk_page_range(start_vaddr, end, &pagemap_walk);""",
-    """		ret = down_read_killable(&mm->mmap_sem);
-		if (ret)
-			goto out_free;
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-		{
-			struct vm_area_struct *map_vma = find_vma(mm, start_vaddr);
+    """static ssize_t pagemap_read(struct file *file, char __user *buf,""",
+    """#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+/* Keep one entry per virtual page; mmap_sem protects every VMA access. */
+static void pagemap_hide_sus_map(struct mm_struct *mm, unsigned long addr,
+				 struct pagemapread *pm)
+{
+	struct vm_area_struct *vma = find_vma(mm, addr);
+	int i;
 
-			if (map_vma && map_vma->vm_start <= start_vaddr &&
-			    map_vma->vm_file &&
-			    SUSFS_IS_INODE_SUS_MAP(file_inode(map_vma->vm_file))) {
-				up_read(&mm->mmap_sem);
-				start_vaddr = map_vma->vm_end;
-				continue;
-			}
-		}
+	for (i = 0; i < pm->pos; i++, addr += PAGE_SIZE) {
+		while (vma && addr >= vma->vm_end)
+			vma = vma->vm_next;
+		if (vma && vma->vm_start <= addr && vma->vm_file &&
+		    SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file)))
+			pm->buffer[i] = make_pme(0, 0);
+	}
+}
 #endif
-		ret = walk_page_range(start_vaddr, end, &pagemap_walk);""",
+
+static ssize_t pagemap_read(struct file *file, char __user *buf,""",
+)
+
+must_replace(
+    "fs/proc/task_mmu.c",
+    """		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+		up_read(&mm->mmap_sem);""",
+    """		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+#ifdef CONFIG_KSU_SUSFS_SUS_MAP
+		pagemap_hide_sus_map(mm, start_vaddr, &pm);
+#endif
+		up_read(&mm->mmap_sem);""",
 )
 
 must_replace(

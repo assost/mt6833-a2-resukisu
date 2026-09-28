@@ -93,7 +93,10 @@ jobs:
           test "$(grep -c '^CONFIG_KSU_SUSFS=y$' out/.config)" = 1
           test "$(grep -c '^CONFIG_KSU=y$' out/.config)" = 1
           test "$(grep -c '^CONFIG_KSU_SUSFS_SUS_MAP=y$' out/.config)" = 1
-          ! grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config
+          if grep -q '^CONFIG_KSU_TRACEPOINT_HOOK=y$' out/.config; then
+            echo "Unexpected tracepoint hook configuration" >&2
+            exit 1
+          fi
           make O=out -j2 2>&1 | tee out/build.log
           test "$(stat -c %s out/arch/arm64/boot/Image.gz-dtb)" -gt 1048576
           sha256sum out/arch/arm64/boot/Image.gz-dtb > out/kernel.sha256
