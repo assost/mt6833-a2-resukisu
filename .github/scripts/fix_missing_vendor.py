@@ -819,9 +819,15 @@ def fix_charger_kernel_include_layout():
             changed = changed.replace(old, new, 1)
         edits.append((path, original, changed))
     original = makefile.read_bytes()
-    line = b"subdir-ccflags-y += -I$(srctree)"
+    # Kbuild addtree treats bare -I.. as relative again; -I../ is preserved.
+    old_line = b"subdir-ccflags-y += -I$(srctree)"
+    line = old_line + b"/"
     changed = original
-    if line not in original.splitlines():
+    if old_line in original.splitlines():
+        changed = original.replace(old_line + b"\r\n", line + b"\r\n").replace(old_line + b"\n", line + b"\n")
+        if changed.endswith(old_line):
+            changed = changed[:-len(old_line)] + line
+    if line not in changed.splitlines():
         newline = b"\r\n" if b"\r\n" in original else b"\n"
         changed += (b"" if original.endswith(b"\n") else newline) + line + newline
     edits.append((makefile, original, changed))
@@ -830,6 +836,22 @@ def fix_charger_kernel_include_layout():
             path.write_bytes(changed)
     if any(original != changed for _, original, changed in edits):
         print("charger: MTK6833 kernel headers use the shared srctree include root")
+
+
+def fix_sensor_proc_id_cast():
+    path = ROOT / "drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo/sensor_devinfo.c"
+    if not path.is_file():
+        return
+    original = path.read_bytes()
+    old = b"#define Ptr2UINT32(p)   (uint32_t)(p)"
+    new = b"#define Ptr2UINT32(p)   (uint32_t)(unsigned long)(p)"
+    if new in original and old not in original:
+        return
+    if original.count(old) != 1 or new in original:
+        raise SystemExit("sensor proc ID conversion missing or ambiguous")
+    # proc_create_data stores enum IDs through UINT2Ptr, not dereferenceable pointers.
+    path.write_bytes(original.replace(old, new, 1))
+    print("sensor: decode proc IDs through a pointer-width integer")
 
 
 def keep_swappiness_limit():
@@ -1166,6 +1188,7 @@ def run_restored_vendor():
     fix_fhctl_register_offset()
     fix_pmu_charger_track_includes()
     fix_sensor_scp_include_gate()
+    fix_sensor_proc_id_cast()
     fix_charger_kernel_include_layout()
     declare_ksu_hooks()
     print("restored vendor mode: factory macros, configuration, headers and performance code retained")

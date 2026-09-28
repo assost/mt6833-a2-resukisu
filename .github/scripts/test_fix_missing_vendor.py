@@ -948,7 +948,7 @@ def check_baseline_include_layout(work):
     scope["fix_sensor_scp_include_gate"]()
     scope["fix_charger_kernel_include_layout"]()
     assert all(path.read_bytes() == after[rel] for rel, path in kernel_paths.items())
-    assert (charger / "Makefile").read_text().splitlines().count("subdir-ccflags-y += -I$(srctree)") == 1
+    assert (charger / "Makefile").read_text().splitlines().count("subdir-ccflags-y += -I$(srctree)/") == 1
     assert all(source.read_bytes() == data for source, data in original.items()), "read-only reference clone changed"
     compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
     make = shutil.which("make")
@@ -994,7 +994,7 @@ def check_baseline_include_layout(work):
     write(charger / "test-kit/include_layout_probe.c", '#include "../charger_ic/include_layout_probe.h"\n')
     for rel, child in (("charger_ic", charger / "v1/Makefile"), ("v1/charger_ic", charger / "v1/Makefile"), ("test-kit", charger / "test-kit/Makefile")):
         inherited = make_flags([charger / "Makefile", child], 4, 19)
-        assert inherited.count("-I..") == 1
+        assert inherited.count("-I../") == 1
         unit = root / "drivers/power/oplus" / rel / "include_layout_probe.c"
         result = subprocess.run([compiler, "-std=gnu11", "-Werror", *inherited, "-fsyntax-only", str(unit)], cwd=out, capture_output=True, text=True)
         if result.returncode:
