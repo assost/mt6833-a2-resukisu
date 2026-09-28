@@ -760,6 +760,78 @@ def fix_pmu_charger_track_includes():
         print(f"PMU: {name} resolves the restored charging header")
 
 
+
+def fix_sensor_scp_include_gate():
+    path = ROOT / "drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo/Makefile"
+    if not path.is_file():
+        return
+    if not (ROOT / "drivers/misc/mediatek/scp/include/scp.h").is_file():
+        raise SystemExit("required SCP public header missing: drivers/misc/mediatek/scp/include/scp.h")
+    original = path.read_bytes()
+    old = b"ifeq ($(findstring k419, $(TARGET_PRODUCT)), k419)"
+    new = b"ifeq ($(VERSION).$(PATCHLEVEL),4.19)"
+    if original.count(new) == 1 and old not in original:
+        return
+    if original.count(old) != 1 or new in original:
+        raise SystemExit("sensor SCP 4.19 include gate missing or ambiguous")
+    path.write_bytes(original.replace(old, new, 1))
+    print("sensor SCP: use exported kernel version for the 4.19 public include path")
+
+
+def fix_charger_kernel_include_layout():
+    directory = ROOT / "drivers/power/oplus"
+    header = directory / "charger_ic/oplus_battery_mtk6833R.h"
+    if not header.is_file():
+        return
+    header_targets = (
+        "drivers/misc/mediatek/typec/tcpc/inc/tcpm.h",
+        "drivers/misc/mediatek/typec/tcpc/inc/mtk_direct_charge_vdm.h",
+        "drivers/power/supply/mediatek/charger/mtk_pe_intf.h",
+        "drivers/power/supply/mediatek/charger/mtk_pe20_intf.h",
+        "drivers/power/supply/mediatek/charger/mtk_pdc_intf.h",
+        "drivers/power/supply/mediatek/charger/mtk_charger_init.h",
+        "drivers/power/supply/mediatek/charger/mtk_charger_intf.h",
+    )
+    c_targets = (
+        "drivers/misc/mediatek/typec/tcpc/inc/tcpci.h",
+        "drivers/misc/mediatek/pmic/mt6360/inc/mt6360_pmu.h",
+    )
+    for target in (*header_targets, *c_targets):
+        if not (ROOT / target).is_file():
+            raise SystemExit(f"required charging kernel header missing: {target}")
+    source = directory / "charger_ic/oplus_battery_mtk6833R.c"
+    makefile = directory / "Makefile"
+    if not source.is_file() or not makefile.is_file():
+        raise SystemExit("restored MTK6833 charger source or root Makefile missing")
+    edits = []
+    for path, targets, prefix in ((header, header_targets, "../../../../kernel-4.19/"),
+                                  (source, c_targets, "../../../")):
+        original = path.read_bytes()
+        changed = original
+        for target in targets:
+            relative = target if path == header else target.removeprefix("drivers/")
+            old = f'#include "{prefix}{relative}"'.encode()
+            new = f"#include <{target}>".encode()
+            if changed.count(new) == 1 and old not in changed:
+                continue
+            if changed.count(old) != 1 or new in changed:
+                raise SystemExit(f"MTK6833 charging include missing or ambiguous: {target}")
+            changed = changed.replace(old, new, 1)
+        edits.append((path, original, changed))
+    original = makefile.read_bytes()
+    line = b"subdir-ccflags-y += -I$(srctree)"
+    changed = original
+    if line not in original.splitlines():
+        newline = b"\r\n" if b"\r\n" in original else b"\n"
+        changed += (b"" if original.endswith(b"\n") else newline) + line + newline
+    edits.append((makefile, original, changed))
+    for path, original, changed in edits:
+        if changed != original:
+            path.write_bytes(changed)
+    if any(original != changed for _, original, changed in edits):
+        print("charger: MTK6833 kernel headers use the shared srctree include root")
+
+
 def keep_swappiness_limit():
     path = ROOT / "kernel/sysctl.c"
     if not path.is_file():
@@ -1093,6 +1165,8 @@ def run_restored_vendor():
     fix_dpmaif_dump_pointers()
     fix_fhctl_register_offset()
     fix_pmu_charger_track_includes()
+    fix_sensor_scp_include_gate()
+    fix_charger_kernel_include_layout()
     declare_ksu_hooks()
     print("restored vendor mode: factory macros, configuration, headers and performance code retained")
 

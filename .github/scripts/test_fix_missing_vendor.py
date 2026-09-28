@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -465,6 +466,7 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     check_panel_project_fallbacks(work)
     check_dpmaif_dump_pointers(work)
     platform_fixtures = check_platform_vendor_fixes(work)
+    platform_fixtures.update(check_baseline_include_layout(work))
     check_restored_vendor_mode(work, platform_fixtures)
     check_include_cache(work)
 
@@ -865,6 +867,142 @@ def check_platform_vendor_fixes(work):
         raise SystemExit(result.stdout + result.stderr)
     print("platform fixes: ARM64 high and 0xCC offsets, truncation rejection, real charging include path, exact source scope and idempotence PASS")
     return {rel: (inputs[rel], outputs[rel]) for rel in inputs}
+
+
+
+def check_baseline_include_layout(work):
+    scope = {"__name__": "baseline_include_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    root = work / "baseline-include-layout-fixture"
+    scope["ROOT"] = root
+    tree = root / ".build-deps/source"
+    charger = tree / "vendor/oplus/kernel/charger"
+    sensor = tree / "vendor/oplus/sensor/kernel/oplus_sensor_devinfo"
+    header_name = "charger_ic/oplus_battery_mtk6833R.h"
+    c_name = "charger_ic/oplus_battery_mtk6833R.c"
+    header_targets = ["drivers/misc/mediatek/typec/tcpc/inc/tcpm.h",
+                      "drivers/misc/mediatek/typec/tcpc/inc/mtk_direct_charge_vdm.h"]
+    header_targets += ["drivers/power/supply/mediatek/charger/" + name for name in
+                       ("mtk_pe_intf.h", "mtk_pe20_intf.h", "mtk_pdc_intf.h", "mtk_charger_init.h", "mtk_charger_intf.h")]
+    c_targets = ["drivers/misc/mediatek/typec/tcpc/inc/tcpci.h",
+                 "drivers/misc/mediatek/pmic/mt6360/inc/mt6360_pmu.h"]
+    targets = header_targets + c_targets
+    original = {}
+    if len(sys.argv) > 9:
+        modules = Path(sys.argv[9])
+        sources = [(charger / name, modules / "vendor/oplus/kernel/charger" / name)
+                   for name in ("Makefile", "v1/Makefile", "test-kit/Makefile", header_name, c_name)]
+        sources += [(sensor / name, modules / "vendor/oplus/sensor/kernel/oplus_sensor_devinfo" / name)
+                    for name in ("Makefile", "oplus_sensor_feedback/Makefile")]
+        original = {source: source.read_bytes() for _, source in sources}
+        for destination, source in sources:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(original[source])
+    else:
+        write(charger / "Makefile", "obj-y += v1/\nobj-y += test-kit/\n")
+        write(charger / "v1/Makefile", "obj-y += charger_ic/\n")
+        write(charger / "test-kit/Makefile", "obj-y += test-kit.o\n")
+        write(charger / header_name, '#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 19, 0)\n/* 4.14 branch retained */\n#else\n' +
+              "".join(f'#include "../../../../kernel-4.19/{target}"\n' for target in header_targets) + '#endif\n')
+        write(charger / c_name, "".join(f'#include "../../../{target.removeprefix("drivers/")}"\n' for target in c_targets))
+        write(sensor / "Makefile", 'ifeq ($(findstring k419, $(TARGET_PRODUCT)), k419)\nsubdir-ccflags-y += -D LINUX_KERNEL_VERSION_419\nsubdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/scp/include\nendif\nsubdir-ccflags-y += -I$(srctree)/drivers/misc/mediatek/scp/rv\n')
+        write(sensor / "oplus_sensor_feedback/Makefile", "obj-y += sensor_feedback.o\n")
+
+    def link_directory(alias, destination):
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(destination)], capture_output=True, text=True)
+            if result.returncode:
+                raise SystemExit(result.stdout + result.stderr)
+        else:
+            alias.symlink_to(os.path.relpath(destination, alias.parent), target_is_directory=True)
+
+    link_directory(root / "drivers/power/oplus", charger)
+    link_directory(charger / "v1/charger_ic", charger / "charger_ic")
+    sensor_alias = root / "drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo"
+    link_directory(sensor_alias, sensor)
+    for index, target in enumerate(targets):
+        write(root / target, f"#define INCLUDED_KERNEL_HEADER_{index} {index + 1}\n")
+    scp_header = "drivers/misc/mediatek/scp/include/scp.h"
+    write(root / scp_header, "#define SCP_PUBLIC_HEADER_PRESENT 1\n")
+    write(root / "drivers/misc/mediatek/scp/rv/scp_helper.h", '#include "scp_feature_define.h"\n')
+    write(root / "drivers/misc/mediatek/scp/rv/scp_feature_define.h", '#include "scp.h"\n')
+    kernel_paths = {"drivers/power/oplus/Makefile": charger / "Makefile",
+                    "drivers/power/oplus/" + header_name: charger / header_name,
+                    "drivers/power/oplus/" + c_name: charger / c_name,
+                    "drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo/Makefile": sensor / "Makefile"}
+    before = {rel: path.read_bytes() for rel, path in kernel_paths.items()}
+    scope["fix_sensor_scp_include_gate"]()
+    scope["fix_charger_kernel_include_layout"]()
+    after = {rel: path.read_bytes() for rel, path in kernel_paths.items()}
+    restored_header = after["drivers/power/oplus/" + header_name]
+    for target in header_targets:
+        restored_header = restored_header.replace(f"#include <{target}>".encode(), f'#include "../../../../kernel-4.19/{target}"'.encode(), 1)
+    assert restored_header == before["drivers/power/oplus/" + header_name], "4.14 branch or charger declarations changed"
+    restored_c = after["drivers/power/oplus/" + c_name]
+    for target in c_targets:
+        restored_c = restored_c.replace(f"#include <{target}>".encode(), f'#include "../../../{target.removeprefix("drivers/")}"'.encode(), 1)
+    assert restored_c == before["drivers/power/oplus/" + c_name]
+    sensor_rel = "drivers/misc/mediatek/sensor/2.0/oplus_sensor_devinfo/Makefile"
+    assert after[sensor_rel].replace(b"ifeq ($(VERSION).$(PATCHLEVEL),4.19)", b"ifeq ($(findstring k419, $(TARGET_PRODUCT)), k419)", 1) == before[sensor_rel]
+    scope["fix_sensor_scp_include_gate"]()
+    scope["fix_charger_kernel_include_layout"]()
+    assert all(path.read_bytes() == after[rel] for rel, path in kernel_paths.items())
+    assert (charger / "Makefile").read_text().splitlines().count("subdir-ccflags-y += -I$(srctree)") == 1
+    assert all(source.read_bytes() == data for source, data in original.items()), "read-only reference clone changed"
+    compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+    make = shutil.which("make")
+    if not compiler or (not make and os.name != "nt"):
+        raise SystemExit("C compiler and GNU make are required for include-layout checks")
+    out = root / "out"
+    out.mkdir()
+
+    def make_flags(files, version, patchlevel, product=""):
+        probe = out / "probe.mk"
+        includes = "".join("include ../" + file.relative_to(root).as_posix() + "\n" for file in files)
+        write(probe, includes + '$(info CHECK_FLAGS=$(subdir-ccflags-y))\n.PHONY: all\nall: ; @:\n')
+        command = [make] if make else ["wsl.exe", "--cd", "/mnt/" + out.drive[0].lower() + out.as_posix()[2:], "--exec", "make"]
+        result = subprocess.run(command + ["--no-print-directory", "-f", "probe.mk", "srctree=..", "src=drivers/power/oplus/v1",
+                                f"VERSION={version}", f"PATCHLEVEL={patchlevel}", f"TARGET_PRODUCT={product}",
+                                "CONFIG_MTK_SENSOR_ARCHITECTURE=2.0", "CONFIG_MTK_TINYSYS_SCP_RV_SUPPORT=y", "CONFIG_MTK_PLATFORM=mt6833"],
+                                cwd=out, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+        line = next(line for line in result.stdout.splitlines() if line.startswith("CHECK_FLAGS="))
+        return shlex.split(line.split("=", 1)[1])
+
+    sensor_files = [sensor / "Makefile", sensor / "oplus_sensor_feedback/Makefile"]
+    flags = make_flags(sensor_files, 4, 19)
+    assert "LINUX_KERNEL_VERSION_419" in flags and "-I../drivers/misc/mediatek/scp/include" in flags
+    for version, patchlevel, product in ((4, 14, "k414"), (5, 10, "k419")):
+        other = make_flags(sensor_files, version, patchlevel, product)
+        assert "LINUX_KERNEL_VERSION_419" not in other and "-I../drivers/misc/mediatek/scp/include" not in other
+    sensor_units = {'sensor_devinfo_probe.c': '#ifdef LINUX_KERNEL_VERSION_419\n#include "scp.h"\n#else\n#error wrong sensor kernel branch\n#endif\n',
+                    'sensor_feedback_probe.c': '#include "scp_helper.h"\n'}
+    for name, content in sensor_units.items():
+        unit = out / name
+        write(unit, content + '_Static_assert(SCP_PUBLIC_HEADER_PRESENT == 1, "SCP public path");\n')
+        result = subprocess.run([compiler, "-std=gnu11", "-Werror", *flags, "-fsyntax-only", str(unit)], cwd=out, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+    assertions = "".join(f'_Static_assert(INCLUDED_KERNEL_HEADER_{index} == {index + 1}, "header {index}");\n' for index in range(9))
+    include_lines = [line for line in (charger / header_name).read_text().splitlines() + (charger / c_name).read_text().splitlines()
+                     if line.startswith("#include <drivers/")]
+    assert len(include_lines) == 9
+    write(charger / "charger_ic/include_layout_probe.h", "\n".join(include_lines) + "\n" + assertions)
+    write(charger / "charger_ic/include_layout_probe.c", '#include "include_layout_probe.h"\n')
+    write(charger / "test-kit/include_layout_probe.c", '#include "../charger_ic/include_layout_probe.h"\n')
+    for rel, child in (("charger_ic", charger / "v1/Makefile"), ("v1/charger_ic", charger / "v1/Makefile"), ("test-kit", charger / "test-kit/Makefile")):
+        inherited = make_flags([charger / "Makefile", child], 4, 19)
+        assert inherited.count("-I..") == 1
+        unit = root / "drivers/power/oplus" / rel / "include_layout_probe.c"
+        result = subprocess.run([compiler, "-std=gnu11", "-Werror", *inherited, "-fsyntax-only", str(unit)], cwd=out, capture_output=True, text=True)
+        if result.returncode:
+            raise SystemExit(result.stdout + result.stderr)
+    print("include layout: GNU make 4.19/4.14/5.10 gates, both SCP consumers, nine charger headers through root/v1/test-kit aliases with O=out, scope and idempotence PASS")
+    fixtures = {rel: (before[rel], after[rel]) for rel in kernel_paths}
+    fixtures.update({target: ((root / target).read_bytes(), (root / target).read_bytes()) for target in targets + [scp_header]})
+    return fixtures
 
 
 def check_restored_vendor_mode(work, platform_fixtures):
