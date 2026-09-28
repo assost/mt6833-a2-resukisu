@@ -462,6 +462,7 @@ static inline int alloc_debug_processing(struct kmem_cache *s,
     assert recovery_after == recovery_source, "unrelated ESD source or initializer changed"
     check_vendor_compat(work)
     check_panel_project_fallbacks(work)
+    check_dpmaif_dump_pointers(work)
     check_include_cache(work)
 
 
@@ -699,6 +700,96 @@ def check_panel_project_fallbacks(work):
                              str(mutant)], capture_output=True, text=True)
     assert result.returncode != 0 and "is_project" in result.stderr and "redefinition" in result.stderr
     print("panel fallback: original stub redefinition reproduced and rejected")
+
+
+
+def check_dpmaif_dump_pointers(work):
+    scope = {"__name__": "dpmaif_pointer_test"}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), scope)
+    root = work / "dpmaif-pointer-fixture"
+    scope["ROOT"] = root
+    signature = "static void dump_drb_queue_data(unsigned int qno)\n{"
+    if len(sys.argv) > 8:
+        original = Path(sys.argv[8]).read_bytes()
+    else:
+        original = (signature + '\nDPMA_DRB_DATA_INFO("%08X(%04d): %016llX %016llX %016llX %016llX %016llX %016llX %016llX %016llX\\n",\n'
+                    '(u32)data_64ptr, (i * 8), *data_64ptr, *(data_64ptr + 1), *(data_64ptr + 2), *(data_64ptr + 3), *(data_64ptr + 4), *(data_64ptr + 5), *(data_64ptr + 6), *(data_64ptr + 7));\n'
+                    'DPMA_DRB_DATA_INFO("%08X(%04d):", (u32)data_8ptr, count * 8);\n}\n').encode()
+    path = root / "drivers/misc/mediatek/eccci/hif/ccci_hif_dpmaif.c"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(original)
+    scope["fix_dpmaif_dump_pointers"]()
+    patched = path.read_bytes()
+    restored = patched.replace(b'DPMA_DRB_DATA_INFO("%p(%04d):', b'DPMA_DRB_DATA_INFO("%08X(%04d):')
+    restored = restored.replace(b"(void *)data_64ptr", b"(u32)data_64ptr")
+    restored = restored.replace(b"(void *)data_8ptr", b"(u32)data_8ptr")
+    assert restored == original, "DPMAIF data, loop or unrelated source changed"
+    scope["fix_dpmaif_dump_pointers"]()
+    assert path.read_bytes() == patched
+    function = patched.decode().replace("\r\n", "\n")
+    start = function.index(signature)
+    function = function[start:function.index("\n}\n", start) + 3]
+    calls = []
+    position = 0
+    while True:
+        position = function.find('DPMA_DRB_DATA_INFO("%p(%04d):', position)
+        if position < 0:
+            break
+        end = function.index(");", position) + 2
+        calls.append(function[position:end])
+        position = end
+    assert len(calls) == 2
+    source = r'''
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint32_t u32;
+static void *pointers[2];
+static int offsets[2], call_count;
+static unsigned long long data[8];
+static void record(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void record(const char *format, ...) {
+    va_list args;
+    int index;
+    if (call_count >= 2 || strncmp(format, "%p(%04d):", 9)) abort();
+    va_start(args, format);
+    pointers[call_count] = va_arg(args, void *);
+    offsets[call_count] = va_arg(args, int);
+    if (call_count == 0)
+        for (index = 0; index < 8; index++) data[index] = va_arg(args, unsigned long long);
+    va_end(args);
+    call_count++;
+}
+#define DPMA_DRB_DATA_INFO record
+_Static_assert(sizeof(void *) > sizeof(u32), "the regression requires 64-bit pointers");
+int main(void) {
+    unsigned long long values[8] = {0x1122334455667788ULL, 2, 3, 4, 5, 6, 7, 8};
+    unsigned long long *data_64ptr = values;
+    unsigned char *data_8ptr = (unsigned char *)(uintptr_t)0x1234567887654321ULL;
+    int i = 3, count = 7;
+''' + "\n".join(calls) + r'''
+    return call_count != 2 || pointers[0] != values || pointers[1] != data_8ptr ||
+           (uintptr_t)pointers[1] != (uintptr_t)0x1234567887654321ULL ||
+           offsets[0] != 24 || offsets[1] != 56 || memcmp(values, data, sizeof(values)) != 0;
+}
+'''
+    unit = root / "pointer_logs.c"
+    write(unit, source)
+    compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+    if not compiler:
+        raise SystemExit("a host C compiler is required for DPMAIF pointer checks")
+    base = [compiler, "-std=gnu11", "-Wall", "-Wformat=2", "-Wpointer-to-int-cast", "-Werror"]
+    executable = root / ("pointer_logs.exe" if os.name == "nt" else "pointer_logs")
+    result = subprocess.run(base + [str(unit), "-o", str(executable)], capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit(result.stdout + result.stderr)
+    subprocess.run([str(executable)], check=True, timeout=15)
+    mutant = root / "pointer_logs_truncating.c"
+    write(mutant, source.replace('(void *)data_64ptr', '(u32)data_64ptr').replace('(void *)data_8ptr', '(u32)data_8ptr'))
+    result = subprocess.run(base + ["-fsyntax-only", str(mutant)], capture_output=True, text=True)
+    assert result.returncode != 0 and "pointer-to-int-cast" in result.stderr
+    print("DPMAIF: strict format check, full pointer width, offsets/data, source preservation and idempotence PASS; truncation regression rejected")
 
 
 def check_include_cache(work):

@@ -693,6 +693,36 @@ def mark_esd_worker_unused_locals():
         print("ESD worker: marked unused locals without dropping initialization")
 
 
+
+def fix_dpmaif_dump_pointers():
+    path = ROOT / "drivers/misc/mediatek/eccci/hif/ccci_hif_dpmaif.c"
+    if not path.is_file():
+        return
+    original = path.read_bytes()
+    newline = b"\r\n" if b"\r\n" in original else b"\n"
+    signature = b"static void dump_drb_queue_data(unsigned int qno)" + newline + b"{"
+    start = original.find(signature)
+    end = original.find(newline + b"}" + newline, start)
+    if start < 0 or end < 0 or original.count(signature) != 1:
+        raise SystemExit("DPMAIF dump function missing or ambiguous")
+    end += len(newline) * 2 + 1
+    function = original[start:end]
+    for old, new, count in (
+        (b'DPMA_DRB_DATA_INFO("%08X(%04d):', b'DPMA_DRB_DATA_INFO("%p(%04d):', 2),
+        (b"(u32)data_64ptr", b"(void *)data_64ptr", 1),
+        (b"(u32)data_8ptr", b"(void *)data_8ptr", 1),
+    ):
+        if function.count(new) == count and old not in function:
+            continue
+        if function.count(old) != count or new in function:
+            raise SystemExit("DPMAIF pointer log anchor missing or ambiguous")
+        function = function.replace(old, new)
+    changed = original[:start] + function + original[end:]
+    if changed != original:
+        path.write_bytes(changed)
+        print("DPMAIF: dump pointer prefixes use %p without truncation")
+
+
 def keep_swappiness_limit():
     path = ROOT / "kernel/sysctl.c"
     if not path.is_file():
@@ -993,6 +1023,7 @@ def main():
     fix_drm_device_prototype()
     fix_sia81xx_prototypes()
     mark_esd_worker_unused_locals()
+    fix_dpmaif_dump_pointers()
     write_healthinfo_ion_header()
     write_oppo_process_header()
     keep_swappiness_limit()
