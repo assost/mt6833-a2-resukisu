@@ -255,17 +255,22 @@ def disable_vendor_configs():
         makefile.write_text(body + extra)
 
 
-def allow_vdso_text_relocs():
+def fix_vdso_linker_flags():
     path = ROOT / "arch/arm64/kernel/vdso/Makefile"
     text = path.read_text()
-    old = "--build-id -n -T"
-    new = "--build-id -n -z notext -T"
-    if new in text:
-        return
-    if old not in text:
-        raise SystemExit("vdso linker flags not found")
-    path.write_text(text.replace(old, new, 1))
-    print("vdso: allow lld text relocations")
+    fixed = "--build-id -n -Bsymbolic -z text -T"
+    if fixed not in text:
+        candidates = ("--build-id -n -z notext -T", "--build-id -n -T")
+        matched = [old for old in candidates if old in text]
+        if len(matched) != 1 or text.count(matched[0]) != 1:
+            raise SystemExit("vdso linker flags missing or ambiguous")
+        text = text.replace(matched[0], fixed, 1)
+    # cmd_ld consumes ldflags-y; this unused variable never enabled -Bsymbolic.
+    text = text.replace("VDSO_LDFLAGS := -Bsymbolic\n", "")
+    if "-z notext" in text:
+        raise SystemExit("Unsafe vDSO TEXTREL allowance remains")
+    path.write_text(text)
+    print("vdso: bind local symbols and reject TEXTREL; Android 64-bit linker compatible")
 
 
 def _push_condition(stack, kind, rest):
@@ -1173,7 +1178,7 @@ def run_restored_vendor():
     tree = validate_restored_vendor()
     # Only compiler/prototype repairs and KSU declarations survive this mode.
     # Scheduler/MM fallbacks and identity stubs belong to the legacy mode.
-    allow_vdso_text_relocs()
+    fix_vdso_linker_flags()
     strip_cr()
     for directory, _, names in os.walk(tree, followlinks=False):
         for name in names:
@@ -1215,7 +1220,7 @@ def main(restored_vendor=False):
         version.write_text("#include <generated/uapi/linux/version.h>\n")
         print("restored include/linux/version.h")
     neutralize_sched_assist_macro()
-    allow_vdso_text_relocs()
+    fix_vdso_linker_flags()
     strip_cr()
     disable_vendor_configs()
     apply_macro_suppression(macros)

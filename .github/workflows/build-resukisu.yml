@@ -79,6 +79,10 @@ jobs:
             out/build-validation.json
             out/vendor-restore-manifest.json
             out/factory-config-audit.json
+            out/vdso-build.log
+            out/vdso-early-validation.json
+            out/vdso-validation.json
+            out/arch/arm64/kernel/vdso/vdso.so
           if-no-files-found: warn
 
   kernel:
@@ -148,4 +152,8 @@ jobs:
             out/build-validation.json
             out/vendor-restore-manifest.json
             out/factory-config-audit.json
+            out/vdso-build.log
+            out/vdso-early-validation.json
+            out/vdso-validation.json
+            out/arch/arm64/kernel/vdso/vdso.so
           if-no-files-found: warn
