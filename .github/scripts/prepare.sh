@@ -31,7 +31,7 @@ if [ "${MODE}" = stock ]; then
 fi
 
 # Real SUSFS v2.3.0, backported to the pinned A2 4.19 source tree.
-RESUKISU_COMMIT="fa8311f632a215b5381ec644627c6198d1e8a13e"
+RESUKISU_COMMIT="94dd3c93c2053a84fd752df6eb85db99b7d70ab8"
 SUSFS_COMMIT="9892175b4acec7ee844e113b8d02c0f4d12cdfac"
 curl -fLSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${RESUKISU_COMMIT}/kernel/setup.sh" | bash -s -- "${RESUKISU_COMMIT}"
 test "$(git -C KernelSU rev-parse HEAD)" = "${RESUKISU_COMMIT}"
