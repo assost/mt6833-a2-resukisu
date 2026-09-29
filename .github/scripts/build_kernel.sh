@@ -28,12 +28,25 @@ mode = sys.argv[1]
 config = set(Path("out/.config").read_text().splitlines())
 required = ["CONFIG_LTO_CLANG=y", "CONFIG_CFI_CLANG=y"]
 if mode == "resukisu":
-    required += ["CONFIG_KSU=y", "CONFIG_KSU_SUSFS=y", "CONFIG_KSU_SUSFS_SUS_MAP=y"]
+    required += [
+        "CONFIG_KSU=y",
+        "CONFIG_KSU_SUSFS=y",
+        "CONFIG_KSU_SUSFS_SUS_MAP=y",
+        "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y",
+        "CONFIG_KSU_SUSFS_TRY_UMOUNT=y",
+        "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
+        "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y",
+    ]
 elif "CONFIG_KSU=y" in config:
     raise SystemExit("stock baseline unexpectedly enables KSU")
 missing = [value for value in required if value not in config]
 if missing:
     raise SystemExit("missing required configuration: " + ", ".join(missing))
+for rejected in ("CONFIG_KSU_SUSFS_SUS_SU=y",):
+    if rejected in config:
+        raise SystemExit("SUSFS option is outside this phase: " + rejected)
 if "CONFIG_KSU_TRACEPOINT_HOOK=y" in config:
     raise SystemExit("unexpected tracepoint hook configuration")
 manifest = Path(".build-deps/vendor-restore-manifest.json")

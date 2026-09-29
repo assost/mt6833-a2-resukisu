@@ -1,0 +1,9 @@
+# Anchor excerpt from ReSukiSU fa8311 kernel/Kconfig.
+# The enabler inserts v1.5.5 options before config KSU_SUSFS_SUS_MAP.
+
+config KSU_SUSFS_SUS_MAP
+    bool "Enable hiding some mmapped real files from different proc maps interfaces"
+    depends on KSU_SUSFS
+    default y
+
+endmenu

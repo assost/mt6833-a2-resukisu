@@ -112,6 +112,26 @@ must_replace(
 )
 
 must_replace(
+    Path("KernelSU/kernel/feature/kernel_umount.c"),
+    """    pr_info("handle umount for uid: %d, pid: %d\\n", new_uid, current->pid);
+
+    saved = override_creds(ksu_cred);
+
+    down_read(&mount_list_lock);""",
+    """    pr_info("handle umount for uid: %d, pid: %d\\n", new_uid, current->pid);
+
+    saved = override_creds(ksu_cred);
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+    {
+        extern void susfs_try_umount_all(uid_t uid);
+        susfs_try_umount_all(new_uid);
+    }
+#endif
+
+    down_read(&mount_list_lock);""",
+)
+
+must_replace(
     Path("drivers/input/input.c"),
     """	unsigned long flags;
 

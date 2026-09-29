@@ -30,13 +30,25 @@ if [ "${MODE}" = stock ]; then
     exit 0
 fi
 
-curl -fLSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+# Historical Actions logs never retained the depth-1 SUSFS rev-parse line.
+# That old SHA is unknown. The commit below is an explicit v1.5.5 baseline,
+# not a claim that run 36468001631 cloned this same object.
+RESUKISU_COMMIT="fa8311f632a215b5381ec644627c6198d1e8a13e"
+SUSFS_COMMIT="001e69919c6271f690fd00b17e4c721c9e599152"
+curl -fLSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/${RESUKISU_COMMIT}/kernel/setup.sh" | bash -s -- "${RESUKISU_COMMIT}"
+test "$(git -C KernelSU rev-parse HEAD)" = "${RESUKISU_COMMIT}"
 SUSFS_DIR="$(mktemp -d "${DEPS}/susfs4ksu.XXXXXX")"
-git clone --depth 1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git "${SUSFS_DIR}"
-echo "SUSFS source commit: $(git -C "${SUSFS_DIR}" rev-parse HEAD)"
+git -C "${SUSFS_DIR}" init -q
+git -C "${SUSFS_DIR}" remote add origin https://gitlab.com/simonpunk/susfs4ksu.git
+git -C "${SUSFS_DIR}" fetch --depth 1 origin "${SUSFS_COMMIT}"
+git -C "${SUSFS_DIR}" checkout --detach FETCH_HEAD
+test "$(git -C "${SUSFS_DIR}" rev-parse HEAD)" = "${SUSFS_COMMIT}"
+grep -q '#define SUSFS_VERSION "v1.5.5"' "${SUSFS_DIR}/kernel_patches/include/linux/susfs.h"
+echo "SUSFS source commit: ${SUSFS_COMMIT} explicit v1.5.5 baseline; historical CI SHA unknown"
 cp -a "${SUSFS_DIR}/kernel_patches/fs/." fs/
 cp -a "${SUSFS_DIR}/kernel_patches/include/linux/." include/linux/
 cp -a "${ROOT}/.github/scripts/susfs_api_compat.c" fs/susfs_api_compat.c
+cp -a "${ROOT}/.github/scripts/susfs_419_logic.h" fs/susfs_419_logic.h
 git apply --whitespace=nowarn "${ROOT}/.github/scripts/a2-susfs.patch"
 python3 "${ROOT}/.github/scripts/adapt.py"
 python3 "${ROOT}/.github/scripts/port_susfs_full.py"
@@ -78,5 +90,7 @@ if "CONFIG_KSU_SUSFS=y" not in text:
 p.write_text(text)
 PY
 
+python3 "${ROOT}/.github/scripts/enable_susfs_419.py" \
+  "${ROOT}/KernelSU/kernel/Kconfig" "${ROOT}/${DEF}"
 echo "prepared"
 grep -n "CONFIG_KSU_SUSFS=\|CONFIG_LTO_CLANG=\|CONFIG_CFI_CLANG=\|CONFIG_OPLUS_ROOT_CHECK" "${DEF}"
