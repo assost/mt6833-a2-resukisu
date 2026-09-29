@@ -25,6 +25,8 @@ git -C "${MODULES_DIR}" checkout --detach FETCH_HEAD
 test "$(git -C "${MODULES_DIR}" rev-parse HEAD)" = "${MODULES_COMMIT}"
 python3 "${ROOT}/.github/scripts/restore_vendor_sources.py" "${MODULES_DIR}" all
 python3 "${ROOT}/.github/scripts/fix_missing_vendor.py" --restored-vendor
+# Use the configuration extracted from the working factory boot, then apply only root integration changes.
+cp "${ROOT}/.github/scripts/factory-boot.config" "${ROOT}/arch/arm64/configs/k6833v1_64_k419_defconfig"
 if [ "${MODE}" = stock ]; then
     echo "official vendor sources prepared; stock feature configuration preserved"
     exit 0

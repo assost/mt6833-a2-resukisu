@@ -15,7 +15,7 @@ concurrency:
 jobs:
   stock:
     name: Stock configuration baseline
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
       - name: Free disk on the runner
@@ -38,18 +38,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev \
             libelf-dev dwarves python3 ccache rsync curl ca-certificates \
-            gcc-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu libncurses5 libtinfo5
 
-      - name: clang-r433403b
+      - name: Checkout factory clang-r383902
+        uses: actions/checkout@v4
+        with:
+          repository: AOSP-10/prebuilts_clang_host_linux-x86_clang-r383902
+          ref: 23ba73b5770985b6bf5f38efceba99019178025c
+          path: clang
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify factory compiler
         run: |
           set -eux
-          git clone --depth 1 --branch 12 \
-            https://github.com/AOSP-12/prebuilts_clang_host_linux-x86_clang-r433403b.git \
-            "$GITHUB_WORKSPACE/clang"
           test -x "$GITHUB_WORKSPACE/clang/bin/clang"
           test -x "$GITHUB_WORKSPACE/clang/bin/ld.lld"
-          "$GITHUB_WORKSPACE/clang/bin/clang" --version
-          df -h
+          "$GITHUB_WORKSPACE/clang/bin/clang" --version | tee factory-clang-version.txt
+          grep -F "6443078" factory-clang-version.txt
+          grep -F "r383902" factory-clang-version.txt
+          grep -F "clang version 11.0.1" factory-clang-version.txt
 
       - name: Prepare stock sources
         run: bash .github/scripts/prepare.sh stock
@@ -70,12 +78,13 @@ jobs:
             out/kernel.sha256
             out/build-validation.json
             out/vendor-restore-manifest.json
+            out/factory-config-audit.json
           if-no-files-found: warn
 
   kernel:
     name: ReSukiSU and SUSFS kernel
     needs: stock
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
       - name: Free disk on the runner
@@ -98,18 +107,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bc bison flex libssl-dev \
             libelf-dev dwarves python3 ccache rsync curl ca-certificates \
-            gcc-aarch64-linux-gnu
+            gcc-aarch64-linux-gnu libncurses5 libtinfo5
 
-      - name: clang-r433403b
+      - name: Checkout factory clang-r383902
+        uses: actions/checkout@v4
+        with:
+          repository: AOSP-10/prebuilts_clang_host_linux-x86_clang-r383902
+          ref: 23ba73b5770985b6bf5f38efceba99019178025c
+          path: clang
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify factory compiler
         run: |
           set -eux
-          git clone --depth 1 --branch 12 \
-            https://github.com/AOSP-12/prebuilts_clang_host_linux-x86_clang-r433403b.git \
-            "$GITHUB_WORKSPACE/clang"
           test -x "$GITHUB_WORKSPACE/clang/bin/clang"
           test -x "$GITHUB_WORKSPACE/clang/bin/ld.lld"
-          "$GITHUB_WORKSPACE/clang/bin/clang" --version
-          df -h
+          "$GITHUB_WORKSPACE/clang/bin/clang" --version | tee factory-clang-version.txt
+          grep -F "6443078" factory-clang-version.txt
+          grep -F "r383902" factory-clang-version.txt
+          grep -F "clang version 11.0.1" factory-clang-version.txt
 
       - name: Prepare resukisu sources
         run: bash .github/scripts/prepare.sh resukisu
@@ -130,4 +147,5 @@ jobs:
             out/kernel.sha256
             out/build-validation.json
             out/vendor-restore-manifest.json
+            out/factory-config-audit.json
           if-no-files-found: warn

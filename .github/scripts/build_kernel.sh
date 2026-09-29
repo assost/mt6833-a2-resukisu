@@ -13,12 +13,13 @@ export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
 export STRIP=llvm-strip HOSTCC=clang HOSTLD=ld.lld
 export PATH="${GITHUB_WORKSPACE:-$(pwd)}/clang/bin:${PATH}"
 # Keep known legacy diagnostics visible; real compile/link errors remain fatal.
-export KCFLAGS="-Wno-error=unused-but-set-variable -Wno-error=strict-prototypes -Wno-error=unused-variable -Wno-error=unused-function"
+export KCFLAGS="-Wno-error=strict-prototypes -Wno-error=unused-variable -Wno-error=unused-function"
 export TMPDIR="$(pwd)/.build-deps"
 mkdir -p "${TMPDIR}" out
 
 make O=out k6833v1_64_k419_defconfig
 cp out/.config out/kernel.config
+python3 .github/scripts/verify_factory_config.py "${MODE}"
 python3 - "${MODE}" <<'PY'
 import json
 import sys
