@@ -2670,15 +2670,16 @@ index 7fb79068..d157c447 100755
  	LSM_HOOK_INIT(ismaclabel, selinux_ismaclabel),
  	LSM_HOOK_INIT(secid_to_secctx, selinux_secid_to_secctx),
 diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
-index f6bc78ab..7920661f 100644
+index f6bc78ab..41a98d6e 100644
 --- a/security/selinux/selinuxfs.c
 +++ b/security/selinux/selinuxfs.c
-@@ -42,6 +42,16 @@
+@@ -42,6 +42,17 @@
  #include "objsec.h"
  #include "conditional.h"
  
 +#ifdef CONFIG_KSU_SUSFS
 +#include <linux/jump_label.h>
++#include "ss/services.h"
 +extern struct selinux_state fake_state;
 +extern struct page *fake_status;
 +extern struct static_key_false fake_status_initialize_key;
@@ -2690,7 +2691,7 @@ index f6bc78ab..7920661f 100644
  enum sel_inos {
  	SEL_ROOT_INO = 2,
  	SEL_LOAD,	/* load policy */
-@@ -231,6 +241,29 @@ static int sel_open_handle_status(struct inode *inode, struct file *filp)
+@@ -231,6 +242,29 @@ static int sel_open_handle_status(struct inode *inode, struct file *filp)
  	return 0;
  }
  
@@ -2701,9 +2702,9 @@ index f6bc78ab..7920661f 100644
 +	int ret;
 +
 +	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_enabled)) {
-+		mutex_lock(&selinux_state.status_lock);
++		mutex_lock(&selinux_state.ss->status_lock);
 +		data = fake_status;
-+		mutex_unlock(&selinux_state.status_lock);
++		mutex_unlock(&selinux_state.ss->status_lock);
 +		if (data) {
 +			filp->private_data = data;
 +			return 0;
@@ -2720,7 +2721,7 @@ index f6bc78ab..7920661f 100644
  static ssize_t sel_read_handle_status(struct file *filp, char __user *buf,
  				      size_t count, loff_t *ppos)
  {
-@@ -266,7 +299,11 @@ static int sel_mmap_handle_status(struct file *filp,
+@@ -266,7 +300,11 @@ static int sel_mmap_handle_status(struct file *filp,
  }
  
  static const struct file_operations sel_handle_status_ops = {
@@ -2732,7 +2733,7 @@ index f6bc78ab..7920661f 100644
  	.read		= sel_read_handle_status,
  	.mmap		= sel_mmap_handle_status,
  	.llseek		= generic_file_llseek,
-@@ -626,6 +663,46 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
+@@ -626,6 +664,46 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
  	return length;
  }
  
@@ -2779,7 +2780,7 @@ index f6bc78ab..7920661f 100644
  static ssize_t sel_read_checkreqprot(struct file *filp, char __user *buf,
  				     size_t count, loff_t *ppos)
  {
-@@ -766,14 +843,26 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size);
+@@ -766,14 +844,26 @@ static ssize_t sel_write_create(struct file *file, char *buf, size_t size);
  static ssize_t sel_write_relabel(struct file *file, char *buf, size_t size);
  static ssize_t sel_write_user(struct file *file, char *buf, size_t size);
  static ssize_t sel_write_member(struct file *file, char *buf, size_t size);
@@ -2806,7 +2807,7 @@ index f6bc78ab..7920661f 100644
  };
  
  static ssize_t selinux_transaction_write(struct file *file, const char __user *buf, size_t size, loff_t *pos)
-@@ -861,6 +950,61 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
+@@ -861,6 +951,61 @@ static ssize_t sel_write_access(struct file *file, char *buf, size_t size)
  	return length;
  }
  
