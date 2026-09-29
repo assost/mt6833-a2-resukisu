@@ -948,6 +948,10 @@ def declare_ksu_hooks():
         text = path.read_text()
         if call not in text or prototype in text:
             continue
+        # Preserve an existing declaration: SUSFS 2.3 uses struct filename ABI.
+        name = call[:-1]
+        if re.search(r"\b(?:int|void)\s+" + re.escape(name) + r"\s*\([^;{}]*\)\s*;", text):
+            continue
         lines = text.splitlines(keepends=True)
         insert_at = 0
         depth = 0

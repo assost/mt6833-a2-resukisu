@@ -1,0 +1,531 @@
+--- a/fs/susfs.c
++++ b/fs/susfs.c
+@@ -15,10 +15,9 @@
+ #include <linux/fdtable.h>
+ #include <linux/statfs.h>
+ #include <linux/random.h>
+-#include <linux/kthread.h>
+-#include <linux/delay.h>
+ #include <linux/workqueue.h>
+ #include <linux/fsnotify_backend.h>
++#include <linux/fscrypt.h>
+ #include <linux/jump_label.h>
+ #include <linux/security.h>
+ #include <linux/susfs.h>
+@@ -569,7 +568,8 @@
+ out_spoof_kstat:
+ 	rcu_read_lock();
+ 	hash_for_each_possible_rcu(SUS_KSTAT_HLIST, entry, node, target_ino) {
+-		if (entry->target_dev == target_dev &&
++		if (entry->target_ino == target_ino &&
++			entry->target_dev == target_dev &&
+ 			entry->is_fuse == is_fuse)
+ 		{
+ 			SUSFS_LOGI("spoofing kstat for vfs_getattr_nosec, target_ino: %lu, target_dev: %u\n",
+@@ -638,7 +638,8 @@
+ out_spoof_kstat:
+ 	rcu_read_lock();
+ 	hash_for_each_possible_rcu(SUS_KSTAT_HLIST, entry, node, target_ino) {
+-		if (entry->target_dev == target_dev &&
++		if (entry->target_ino == target_ino &&
++			entry->target_dev == target_dev &&
+ 			entry->is_fuse == is_fuse)
+ 		{
+ 			SUSFS_LOGI("spoofing kstat for show_map_vma, target_ino: %lu, target_dev: %u\n", target_ino, target_dev);
+@@ -660,7 +661,8 @@
+ 
+ 	rcu_read_lock();
+ 	hash_for_each_possible_rcu(SUS_KSTAT_HLIST, entry, node, target_inode->i_ino) {
+-		if (entry->target_dev == inode->i_sb->s_dev)
++		if (entry->target_ino == target_inode->i_ino &&
++			entry->target_dev == target_inode->i_sb->s_dev)
+ 		{
+ 			SUSFS_LOGI("spoofing kstat for vfs_statfs, target_ino: %lu, target_dev: %u\n", target_inode->i_ino, target_inode->i_sb->s_dev);
+ 			memcpy(buf, &entry->spoofed_kstatfs, sizeof(struct kstatfs));
+@@ -677,7 +679,8 @@
+ 
+ 	rcu_read_lock();
+ 	hash_for_each_possible_rcu(SUS_KSTAT_HLIST, entry, node, *out_target_ino) {
+-		if (entry->target_dev == *out_target_dev)
++		if (entry->target_ino == *out_target_ino &&
++			entry->target_dev == *out_target_dev)
+ 		{
+ 			SUSFS_LOGI("spoofing kstat for inotify_fdinfo, target_ino: %lu, target_dev: %u\n", *out_target_ino, *out_target_dev);
+ 			*out_target_ino = entry->info.spoofed_ino;
+@@ -694,7 +697,8 @@
+ 
+ 	rcu_read_lock();
+ 	hash_for_each_possible_rcu(SUS_KSTAT_HLIST, entry, node, *out_target_ino) {
+-		if (entry->target_dev == target_dev)
++		if (entry->target_ino == *out_target_ino &&
++			entry->target_dev == target_dev)
+ 		{
+ 			SUSFS_LOGI("spoofing kstat for proc_fd_seq_show, target_ino: %lu, target_dev: %u\n", *out_target_ino, target_dev);
+ 			*out_target_mnt_id = entry->spoofed_mnt_id;
+@@ -1039,6 +1043,7 @@
+ 
+ 	hash_for_each_possible_rcu(OPEN_REDIRECT_HLIST, entry, node, inode->i_ino) {
+ 		if (!entry->reversed_lookup_only &&
++			entry->target_ino == inode->i_ino &&
+ 			entry->target_dev == inode->i_sb->s_dev)
+ 		{
+ 			switch(entry->info.uid_scheme) {
+@@ -1077,56 +1082,55 @@
+ 	return new_filename;
+ }
+ 
+-int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode, char __user *buffer, int buflen) {
+-	struct st_susfs_open_redirect_hlist *entry = NULL;
+-	int srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);
+-
++/* readlink returns bytes, does not append NUL, and permits truncation. */
++int susfs_open_redirect_spoof_vfs_readlink(struct inode *inode,
++					char __user *buffer, int buflen)
++{
++	struct st_susfs_open_redirect_hlist *entry;
++	int srcu_idx, len, ret = -ENOENT;
++
++	if (buflen <= 0)
++		return -EINVAL;
++	srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);
+ 	hash_for_each_possible_rcu(OPEN_REDIRECT_HLIST, entry, node, inode->i_ino) {
+-		if (entry->reversed_lookup_only &&
+-			entry->target_dev == inode->i_sb->s_dev)
+-		{
+-			SUSFS_LOGI("spoof path '%s' to '%s'\n",
+-					entry->info.target_pathname, entry->info.redirected_pathname);
+-			if (strlen(entry->info.redirected_pathname) >= buflen) {
+-				SUSFS_LOGE("buflen not big enough\n");
+-				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-				return -ENAMETOOLONG;
+-			}
+-			if (copy_to_user(buffer, entry->info.redirected_pathname, strlen(entry->info.redirected_pathname))) {
+-				SUSFS_LOGE("copy_to_user() failed\n");
+-				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-				return -EFAULT;
+-			}
+-			srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-			return 0;
+-		}
++		if (!entry->reversed_lookup_only ||
++		    entry->target_ino != inode->i_ino ||
++		    entry->target_dev != inode->i_sb->s_dev)
++			continue;
++		len = min_t(size_t, buflen,
++			    strnlen(entry->info.redirected_pathname,
++				    sizeof(entry->info.redirected_pathname)));
++		ret = copy_to_user(buffer, entry->info.redirected_pathname, len) ?
++			-EFAULT : len;
++		break;
+ 	}
+ 	srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-	return -ENOENT;
+-}
+-
+-int susfs_open_redirect_spoof_do_proc_readlink(struct inode *inode, char *tmp_buf, int buflen) {
+-	struct st_susfs_open_redirect_hlist *entry = NULL;
+-	int srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);
+-
++	return ret;
++}
++
++int susfs_open_redirect_spoof_do_proc_readlink(struct inode *inode,
++					     char *tmp_buf, int buflen)
++{
++	struct st_susfs_open_redirect_hlist *entry;
++	int srcu_idx, len, ret = -ENOENT;
++
++	if (buflen <= 0)
++		return -EINVAL;
++	srcu_idx = srcu_read_lock(&susfs_srcu_open_redirect);
+ 	hash_for_each_possible_rcu(OPEN_REDIRECT_HLIST, entry, node, inode->i_ino) {
+-		if (entry->reversed_lookup_only &&
+-			entry->target_dev == inode->i_sb->s_dev)
+-		{
+-			SUSFS_LOGI("spoof path '%s' to '%s'\n",
+-					entry->info.target_pathname, entry->info.redirected_pathname);
+-			if (strlen(entry->info.redirected_pathname) >= buflen) {
+-				SUSFS_LOGE("buflen not big enough\n");
+-				srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-				return -ENAMETOOLONG;
+-			}
+-			strscpy(tmp_buf, entry->info.redirected_pathname, SUSFS_MAX_LEN_PATHNAME - 1);
+-			srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-			return 0;
+-		}
++		if (!entry->reversed_lookup_only ||
++		    entry->target_ino != inode->i_ino ||
++		    entry->target_dev != inode->i_sb->s_dev)
++			continue;
++		len = min_t(size_t, buflen,
++			    strnlen(entry->info.redirected_pathname,
++				    sizeof(entry->info.redirected_pathname)));
++		memcpy(tmp_buf, entry->info.redirected_pathname, len);
++		ret = len;
++		break;
+ 	}
+ 	srcu_read_unlock(&susfs_srcu_open_redirect, srcu_idx);
+-	return -ENOENT;
++	return ret;
+ }
+ 
+ /* callers must hold and release the "susfs_srcu_open_redirect" lock themselves. */
+@@ -1140,6 +1144,7 @@
+ 
+ 	hash_for_each_possible_rcu(OPEN_REDIRECT_HLIST, entry, node, inode->i_ino) {
+ 		if (entry->reversed_lookup_only &&
++			entry->target_ino == inode->i_ino &&
+ 			entry->target_dev == inode->i_sb->s_dev)
+ 		{
+ 			SUSFS_LOGI("spoof maps ino/dev/name for redirected path: '%s'\n",
+@@ -1345,179 +1350,168 @@
+ 	SUSFS_LOGI("CMD_SUSFS_SHOW_VERSION -> ret: %d\n", info.err);
+ }
+ 
+-/* kthread for checking if /sdcard/Android is accessible via fsnoitfy */
+-/* code is straightly borrowed from KernelSU's pkg_observer.c */
++/* Observe the underlying directory, avoiding the FUSE sdcard layer. */
+ #define SDCARD_ANDROID_PATH "/data/media/0/Android"
++#define SDCARD_WATCH_PATH "/data/media/0"
++#define SDCARD_RETRY_DELAY (5 * HZ)
+ DEFINE_STATIC_KEY_TRUE(susfs_is_sdcard_android_data_not_decrypted);
+ 
+-struct watch_dir {
+-	const char *path;
+-	u32 mask;
+-	struct path kpath;
++/* 0: not started, 1: probing/watching, 2: verified accessible. */
++static atomic_t sdcard_monitor_state = ATOMIC_INIT(0);
++static DEFINE_MUTEX(sdcard_monitor_lock);
++static struct fsnotify_group *sdcard_group;
++static struct path sdcard_watch_path;
++static void susfs_sdcard_cleanup_fn(struct work_struct *work);
++static DECLARE_DELAYED_WORK(sdcard_cleanup_dwork, susfs_sdcard_cleanup_fn);
++
++/* Exact Linux 4.19 callback ABI, including its iterator argument. */
++static int susfs_handle_sdcard_event(struct fsnotify_group *group,
++		struct inode *inode, u32 mask, const void *data, int data_type,
++		const unsigned char *file_name, u32 cookie,
++		struct fsnotify_iter_info *iter_info)
++{
++	if (atomic_read(&sdcard_monitor_state) != 1 || !file_name ||
++	    strcmp((const char *)file_name, "Android") ||
++	    !(mask & (FS_OPEN | FS_CREATE | FS_MOVED_TO)))
++		return 0;
++
++	/* Never wait for fsnotify SRCU or perform path I/O in this callback. */
++	queue_delayed_work(system_unbound_wq, &sdcard_cleanup_dwork,
++			   SDCARD_RETRY_DELAY);
++	return 0;
++}
++
++static void susfs_sdcard_free_mark(struct fsnotify_mark *mark)
++{
++	kfree(mark);
++}
++
++static const struct fsnotify_ops susfs_sdcard_fsnotify_ops = {
++	.handle_event = susfs_handle_sdcard_event,
++	.free_mark = susfs_sdcard_free_mark,
++};
++
++/* Caller holds sdcard_monitor_lock. No mark reference is kept by this owner. */
++static int susfs_install_sdcard_watch(void)
++{
++	struct fsnotify_group *group;
++	struct fsnotify_mark *mark;
++	struct path path;
+ 	struct inode *inode;
+-	struct fsnotify_mark *mark;
+-};
+-
+-static struct fsnotify_group *g;
+-
+-static struct watch_dir g_watch = { .path = "/data/media/0", // we choose the underlying f2fs /data/media/0 instead of the FUSE /sdcard
+-									.mask = (FS_EVENT_ON_CHILD | FS_ISDIR | FS_OPEN_PERM) };
+-
+-static int add_mark_on_inode(struct inode *inode, u32 mask,
+-								struct fsnotify_mark **out);
+-
+-static unsigned long sdcard_cleanup_scheduled;
+-static struct delayed_work sdcard_cleanup_dwork;
++	int ret;
++
++	ret = kern_path(SDCARD_WATCH_PATH, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &path);
++	if (ret)
++		return ret;
++	inode = d_backing_inode(path.dentry);
++	if (!inode) {
++		ret = -ENOENT;
++		goto out_path;
++	}
++	group = fsnotify_alloc_group(&susfs_sdcard_fsnotify_ops);
++	if (IS_ERR(group)) {
++		ret = PTR_ERR(group);
++		goto out_path;
++	}
++	mark = kzalloc(sizeof(*mark), GFP_KERNEL);
++	if (!mark) {
++		ret = -ENOMEM;
++		goto out_group;
++	}
++	fsnotify_init_mark(mark, group);
++	mark->mask = FS_EVENT_ON_CHILD | FS_OPEN | FS_CREATE | FS_MOVED_TO;
++	ret = fsnotify_add_inode_mark(mark, inode, 0);
++	/* add holds its own reference; failed add leaves only our initial one. */
++	fsnotify_put_mark(mark);
++	if (ret)
++		goto out_group;
++	sdcard_group = group;
++	sdcard_watch_path = path;
++	return 0;
++
++out_group:
++	fsnotify_destroy_group(group);
++out_path:
++	path_put(&path);
++	return ret;
++}
+ 
+ static void susfs_sdcard_cleanup_fn(struct work_struct *work)
+ {
+-	struct fsnotify_group *grp;
+-	struct inode *inode;
+-
+-	if (static_key_enabled(&susfs_is_sdcard_android_data_not_decrypted))
++	const struct cred *saved;
++	struct cred *cred;
++	struct file *dir;
++	int ret;
++
++	mutex_lock(&sdcard_monitor_lock);
++	if (atomic_read(&sdcard_monitor_state) != 1)
++		goto out_unlock;
++
++	cred = prepare_creds();
++	if (!cred)
++		goto retry;
++	setup_selinux("u:r:ksu:s0", cred);
++	saved = override_creds(cred);
++	if (!susfs_is_current_ksu_domain()) {
++		ret = -EACCES;
++		goto out_creds;
++	}
++
++	/* An event alone (especially a permission event) does not prove access.
++	 * Directory open can succeed without an fscrypt key in 4.19, so check
++	 * the loaded key explicitly. Polling also covers late/missed events.
++	 */
++	dir = filp_open(SDCARD_ANDROID_PATH, O_RDONLY | O_DIRECTORY, 0);
++	if (!IS_ERR(dir) && IS_ENCRYPTED(file_inode(dir)) &&
++	    !fscrypt_has_encryption_key(file_inode(dir))) {
++		filp_close(dir, NULL);
++		dir = ERR_PTR(-ENOKEY);
++	}
++	if (!IS_ERR(dir)) {
++		filp_close(dir, NULL);
++		atomic_set(&sdcard_monitor_state, 2);
+ 		static_branch_disable(&susfs_is_sdcard_android_data_not_decrypted);
+-	SUSFS_LOGI("/sdcard is decrypted\n");
+-	SUSFS_LOGI("cleaning up fsnotify sdcard watch\n");
+-
+-	grp = xchg(&g, NULL);
+-	if (grp)
+-		fsnotify_destroy_group(grp);
+-
+-	inode = xchg(&g_watch.inode, NULL);
+-	if (inode)
+-		iput(inode);
+-
+-	if (g_watch.kpath.mnt) {
+-		path_put(&g_watch.kpath);
+-		memset(&g_watch.kpath, 0, sizeof(g_watch.kpath));
+-	}
+-}
+-
+-static int watch_one_dir(struct watch_dir *wd)
++		SUSFS_LOGI("verified access to %s; removing watch\n", SDCARD_ANDROID_PATH);
++		if (sdcard_group) {
++			fsnotify_destroy_group(sdcard_group);
++			sdcard_group = NULL;
++			path_put(&sdcard_watch_path);
++			memset(&sdcard_watch_path, 0, sizeof(sdcard_watch_path));
++		}
++		ret = 0;
++	} else {
++		ret = PTR_ERR(dir);
++		if (!sdcard_group) {
++			int watch_ret = susfs_install_sdcard_watch();
++
++			if (watch_ret && watch_ret != -ENOENT && watch_ret != -ENOKEY)
++				SUSFS_LOGE("sdcard watch install failed: %d; retrying\n", watch_ret);
++		}
++	}
++out_creds:
++	revert_creds(saved);
++	abort_creds(cred);
++	if (!ret)
++		goto out_unlock;
++retry:
++	queue_delayed_work(system_unbound_wq, &sdcard_cleanup_dwork,
++			   SDCARD_RETRY_DELAY);
++out_unlock:
++	mutex_unlock(&sdcard_monitor_lock);
++}
++
++void susfs_start_sdcard_monitor_fn(void)
+ {
+-	int ret = kern_path(wd->path, LOOKUP_FOLLOW, &wd->kpath);
+-	if (ret) {
+-		SUSFS_LOGI("path not ready: %s (%d)\n", wd->path, ret);
+-		return ret;
+-	}
+-	wd->inode = d_backing_inode(wd->kpath.dentry);
+-	if (!wd->inode) {
+-		SUSFS_LOGE("wd->inode is NULL\n");
+-		path_put(&wd->kpath);
+-		return -ENOENT;
+-	}
+-	ihold(wd->inode);
+-
+-	ret = add_mark_on_inode(wd->inode, wd->mask, &wd->mark);
+-	if (ret) {
+-		SUSFS_LOGE("add mark failed for %s (%d)\n", wd->path, ret);
+-		iput(wd->inode);
+-		wd->inode = NULL;
+-		path_put(&wd->kpath);
+-		return ret;
+-	}
+-	SUSFS_LOGI("watching %s\n", wd->path);
+-	return 0;
+-}
+-
+-/*
+- * fsnotify handler — runs inside an SRCU read section held by fsnotify().
+- * Must not block or call fsnotify_destroy_group() (which internally calls
+- * synchronize_srcu on the same SRCU struct, causing a permanent deadlock).
+- * Cleanup is deferred to a delayed_work that runs outside the SRCU context.
+- */
+-static int susfs_handle_sdcard_inode_event(struct fsnotify_mark *mark, u32 mask,
+-											struct inode *inode, struct inode *dir,
+-											const struct qstr *file_name, u32 cookie)
+-{
+-	if (!file_name || file_name->len != 7 ||
+-	    memcmp(file_name->name, "Android", 7))
+-		return 0;
+-
+-	if (test_and_set_bit(0, &sdcard_cleanup_scheduled))
+-		return 0;
+-
+-	SUSFS_LOGI("'%s' detected, mask: 0x%x\n", SDCARD_ANDROID_PATH, mask);
+-	SUSFS_LOGI("deferring cleanup for 5 seconds\n");
+-	queue_delayed_work(system_unbound_wq, &sdcard_cleanup_dwork, 5 * HZ);
+-	return 0;
+-}
+-
+-static const struct fsnotify_ops fsnotify_ops = {
+-	.handle_inode_event = susfs_handle_sdcard_inode_event,
+-};
+-
+-static int add_mark_on_inode(struct inode *inode, u32 mask,
+-								struct fsnotify_mark **out)
+-{
+-	struct fsnotify_mark *m;
+-
+-	m = kzalloc(sizeof(*m), GFP_KERNEL);
+-	if (!m)
+-		return -ENOMEM;
+-
+-	fsnotify_init_mark(m, g);
+-	m->mask = mask;
+-
+-	if (fsnotify_add_inode_mark(m, inode, 0)) {
+-		fsnotify_put_mark(m);
+-		return -EINVAL;
+-	}
+-	*out = m;
+-	return 0;
+-}
+-
+-static int susfs_sdcard_monitor_fn(void *data)
+-{
+-	struct cred *cred = prepare_creds();
+-	int ret = 0;
+-
+-	if (!cred) {
+-		SUSFS_LOGE("failed to prepare creds!\n");
+-		return -ENOMEM;
+-	}
+-
+-	setup_selinux("u:r:ksu:s0", cred);
+-	commit_creds(cred);
+-
+-	if (!susfs_is_current_ksu_domain()) {
+-		SUSFS_LOGE("domain is not ksu, exiting the thread\n");
+-		return -EINVAL;
+-	}
+-
+-	SUSFS_LOGI("start monitoring path '%s' using fsnotify\n",
+-				SDCARD_ANDROID_PATH);
+-
+-	INIT_DELAYED_WORK(&sdcard_cleanup_dwork, susfs_sdcard_cleanup_fn);
+-
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+-	g = fsnotify_alloc_group(&fsnotify_ops, 0);
+-#else
+-	g = fsnotify_alloc_group(&fsnotify_ops);
+-#endif
+-	if (IS_ERR(g)) {
+-		return PTR_ERR(g);
+-	}
+-
+-	ret = watch_one_dir(&g_watch);
+-
+-	SUSFS_LOGI("ret: %d\n", ret);
+-
+-	return 0;
+-}
+-
+-void susfs_start_sdcard_monitor_fn(void) {
+-	if (IS_ERR(kthread_run(susfs_sdcard_monitor_fn, NULL, "susfs_sdcard_monitor"))) {
+-		SUSFS_LOGE("failed to create thread susfs_sdcard_monitor\n");
+-		SUSFS_LOGI("/sdcard is forcibly set decrypted\n");
+-		if (static_key_enabled(&susfs_is_sdcard_android_data_not_decrypted))
+-			static_branch_disable(&susfs_is_sdcard_android_data_not_decrypted);
+-	}
++	/* Repeated starts cannot reinitialize live work or install extra marks. */
++	if (atomic_cmpxchg(&sdcard_monitor_state, 0, 1) == 0)
++		queue_delayed_work(system_unbound_wq, &sdcard_cleanup_dwork, 0);
+ }
+ 
+ // - defer extra susfs works to workqueue after do_umount in ksu_handle_setresuid()
+ //   so that we do not block there and reduce the risk of time side channel as much as possible.
+-struct work_struct susfs_extra_works;
++static void susfs_run_extra_works(struct work_struct *work);
++DECLARE_WORK(susfs_extra_works, susfs_run_extra_works);
++
+ static void susfs_run_extra_works(struct work_struct *work) {
+ 	if (!ksu_cred)
+ 		return;
+@@ -1527,9 +1521,7 @@
+ }
+ 
+ /* susfs_init */
+-void susfs_init(void) {\
+-	SUSFS_LOGI("Initializing susfs_extra_works\n");
+-	INIT_WORK(&susfs_extra_works, susfs_run_extra_works);
++void susfs_init(void) {
+ 	SUSFS_LOGI("susfs is initialized! version: " SUSFS_VERSION " \n");
+ }
+ 
+--- a/include/linux/susfs_def.h
++++ b/include/linux/susfs_def.h
+@@ -2,6 +2,8 @@
+ #define KSU_SUSFS_DEF_H
+ 
+ #include <linux/bits.h>
++#include <linux/sched.h>
++#include <linux/cred.h>
+ #include <linux/string.h>
+ 
+ /********/

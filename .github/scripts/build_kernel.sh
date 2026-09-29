@@ -28,17 +28,7 @@ mode = sys.argv[1]
 config = set(Path("out/.config").read_text().splitlines())
 required = ["CONFIG_LTO_CLANG=y", "CONFIG_CFI_CLANG=y"]
 if mode == "resukisu":
-    required += [
-        "CONFIG_KSU=y",
-        "CONFIG_KSU_SUSFS=y",
-        "CONFIG_KSU_SUSFS_SUS_MAP=y",
-        "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y",
-        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y",
-        "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y",
-        "CONFIG_KSU_SUSFS_TRY_UMOUNT=y",
-        "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y",
-        "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y",
-    ]
+    required += ['CONFIG_KSU=y', 'CONFIG_KSU_SUSFS=y', 'CONFIG_KSU_SUSFS_SUS_PATH=y', 'CONFIG_KSU_SUSFS_SUS_MOUNT=y', 'CONFIG_KSU_SUSFS_SUS_KSTAT=y', 'CONFIG_KSU_SUSFS_SPOOF_UNAME=y', 'CONFIG_KSU_SUSFS_ENABLE_LOG=y', 'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y', 'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y', 'CONFIG_KSU_SUSFS_OPEN_REDIRECT=y', 'CONFIG_KSU_SUSFS_SUS_MAP=y']
 elif "CONFIG_KSU=y" in config:
     raise SystemExit("stock baseline unexpectedly enables KSU")
 missing = [value for value in required if value not in config]
@@ -59,6 +49,10 @@ PY
     git rev-parse HEAD
     if [ "${MODE}" = resukisu ]; then
         git -C KernelSU rev-parse HEAD
+        grep 'SUSFS_VERSION "v2.3.0"' include/linux/susfs.h
+        test ! -f fs/susfs_api_compat.c
+        sha256sum fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h
+        grep -n 'susfs_start_sdcard_monitor_fn\|susfs_run_extra_works\|susfs_set_hide_sus_mnts_for_non_su_procs' fs/susfs.c
         for source in mm/memory.c fs/proc/task_mmu.c; do
             grep -n "SUSFS_IS_INODE_SUS_MAP" "${source}"
         done
