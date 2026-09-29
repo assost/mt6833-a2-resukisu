@@ -63,7 +63,7 @@ PY
 
 # Reject loader-incompatible vDSO metadata before the full kernel build.
 make O=out -j2 V=1 vdso_prepare 2>&1 | tee out/vdso-build.log
-python3 .github/scripts/verify_vdso.py --elf out/arch/arm64/kernel/vdso/vdso.so --output out/vdso-early-validation.json
+python3 .github/scripts/verify_vdso.py --elf out/arch/arm64/kernel/vdso/vdso.so.dbg --output out/vdso-early-validation.json
 
 # Android.mk / kenv.mk select Image.gz. Stock DTBO is retained on the device;
 # building all OEM overlays would additionally require external DWS generation.
