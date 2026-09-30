@@ -19,10 +19,18 @@ git -C "${MODULES_DIR}" init -q
 git -C "${MODULES_DIR}" config core.autocrlf false
 git -C "${MODULES_DIR}" remote add origin https://github.com/oppo-source/android_kernel_modules_oppo_mt6833.git
 git -C "${MODULES_DIR}" sparse-checkout init --cone
-git -C "${MODULES_DIR}" sparse-checkout set vendor/oplus
+git -C "${MODULES_DIR}" sparse-checkout set vendor/oplus \
+    vendor/mediatek/kernel_modules/connectivity/common \
+    vendor/mediatek/kernel_modules/connectivity/connfem \
+    vendor/mediatek/kernel_modules/connectivity/wlan/adaptor \
+    vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m \
+    vendor/mediatek/kernel_modules/connectivity/bt/mt66xx \
+    vendor/mediatek/kernel_modules/connectivity/gps \
+    vendor/mediatek/kernel_modules/connectivity/fmradio
 git -C "${MODULES_DIR}" fetch --depth 1 --filter=blob:none origin "${MODULES_COMMIT}"
 git -C "${MODULES_DIR}" checkout --detach FETCH_HEAD
 test "$(git -C "${MODULES_DIR}" rev-parse HEAD)" = "${MODULES_COMMIT}"
+printf '%s\n' "${MODULES_DIR}" > "${DEPS}/connectivity-source.txt"
 python3 "${ROOT}/.github/scripts/restore_vendor_sources.py" "${MODULES_DIR}" all
 python3 "${ROOT}/.github/scripts/fix_missing_vendor.py" --restored-vendor
 # Use the configuration extracted from the working factory boot, then apply only root integration changes.

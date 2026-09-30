@@ -18,6 +18,10 @@ export TMPDIR="$(pwd)/.build-deps"
 mkdir -p "${TMPDIR}" out
 
 make O=out k6833v1_64_k419_defconfig
+# Trust the factory public module certificate while preserving forced verification.
+cp .github/certs/factory-modules.pem certs/factory-modules.pem
+scripts/config --file out/.config --set-str SYSTEM_TRUSTED_KEYS certs/factory-modules.pem
+make O=out olddefconfig
 cp out/.config out/kernel.config
 python3 .github/scripts/verify_factory_config.py "${MODE}"
 python3 - "${MODE}" <<'PY'
@@ -73,3 +77,6 @@ test "$(stat -c %s out/arch/arm64/boot/Image.gz)" -gt 1048576
 sha256sum out/arch/arm64/boot/Image.gz > out/kernel.sha256
 python3 .github/scripts/verify_vdso.py --elf out/arch/arm64/kernel/vdso/vdso.so --image-gz out/arch/arm64/boot/Image.gz --output out/vdso-validation.json
 ls -lh out/arch/arm64/boot/Image.gz
+
+# Each variant owns its generated signing key and Module.symvers.
+python3 .github/scripts/build_connectivity.py "${MODE}"
