@@ -72,6 +72,15 @@ endif"""
 
 
 def patch_runtime(conn):
+    path = conn / "common/common_main/linux/stp_uart.c"
+    text = path.read_text(encoding="utf-8")
+    # This UART-local legacy lock collides with exFAT's global buf_lock()
+    # when both previously separate objects enter the same kernel link.
+    # Its uses are currently disabled, so retain it without an unused warning.
+    write(path, replace_once(text, "\nspinlock_t buf_lock;\n",
+                            "\nstatic __maybe_unused spinlock_t buf_lock;\n",
+                            "UART private buffer lock"))
+
     path = conn / "gps/gps_stp/gps_emi.c"
     text = path.read_text(encoding="utf-8")
     old = """#if defined(GPS_EMI_NEW_API)
