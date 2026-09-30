@@ -71,6 +71,30 @@ endif"""
     return text
 
 
+def transform_bluetooth_dispatch(text):
+    old = """#ifdef CONFIG_MTK_COMBO_BT
+int __attribute__((weak)) mtk_wcn_stpbt_drv_init()
+{
+\tWMT_DETECT_PR_INFO("Not implement mtk_wcn_stpbt_drv_init\\n");
+\treturn 0;
+}
+#endif"""
+    new = """#ifdef MTK_WCN_BUILT_IN_DRIVER
+/* All seven in-tree drivers are selected independently of the factory BT tristate. */
+extern int mtk_wcn_stpbt_drv_init(void);
+#elif defined(CONFIG_MTK_COMBO_BT)
+int __attribute__((weak)) mtk_wcn_stpbt_drv_init()
+{
+\tWMT_DETECT_PR_INFO("Not implement mtk_wcn_stpbt_drv_init\\n");
+\treturn 0;
+}
+#endif"""
+    text = replace_once(text, old, new, "BT scoped strong dependency")
+    return replace_once(text, '#ifdef CONFIG_MTK_COMBO_BT\n\tWMT_DETECT_PR_INFO("start to do bluetooth driver init\\n");',
+                        '#if defined(CONFIG_MTK_COMBO_BT) || defined(MTK_WCN_BUILT_IN_DRIVER)\n\tWMT_DETECT_PR_INFO("start to do bluetooth driver init\\n");',
+                        "BT scoped dispatcher selection")
+
+
 def patch_runtime(conn):
     path = conn / "common/common_main/linux/stp_uart.c"
     text = path.read_text(encoding="utf-8")
@@ -80,6 +104,9 @@ def patch_runtime(conn):
     write(path, replace_once(text, "\nspinlock_t buf_lock;\n",
                             "\nstatic __maybe_unused spinlock_t buf_lock;\n",
                             "UART private buffer lock"))
+
+    path = conn / "common/common_detect/drv_init/bluetooth_drv_init.c"
+    write(path, transform_bluetooth_dispatch(path.read_text(encoding="utf-8")))
 
     path = conn / "gps/gps_stp/gps_emi.c"
     text = path.read_text(encoding="utf-8")

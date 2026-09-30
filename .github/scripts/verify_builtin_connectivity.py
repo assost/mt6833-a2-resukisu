@@ -9,6 +9,7 @@ import subprocess
 import zipfile
 
 from integrate_builtin_connectivity import COMMIT, MODULES, PARENT, PREFIX, sha, write
+from verify_builtin_dispatch import verify_dispatch
 
 ENTRIES = (
     "mtk_wcn_common_drv_init", "mtk_wcn_stpbt_drv_init", "mtk_wcn_stpgps_builtin_init",
@@ -37,6 +38,11 @@ def verify_source(root):
     gps = (tree / PREFIX / "gps/gps_stp/stp_chrdev_gps.c").read_text()
     if "static int __init gps_mod_init" in gps or "int mtk_wcn_stpgps_builtin_init(void)" not in gps:
         raise ValueError("GPS late-entry lifetime or full-init wrapper missing")
+    bluetooth = (tree / PREFIX / "common/common_detect/drv_init/bluetooth_drv_init.c").read_text()
+    if ('#ifdef MTK_WCN_BUILT_IN_DRIVER' not in bluetooth
+            or 'extern int mtk_wcn_stpbt_drv_init(void);' not in bluetooth
+            or '#if defined(CONFIG_MTK_COMBO_BT) || defined(MTK_WCN_BUILT_IN_DRIVER)' not in bluetooth):
+        raise ValueError("BT built-in dispatcher selection/strong dependency missing")
     return manifest
 
 
@@ -95,6 +101,9 @@ def verify(root, out, nm, mode):
             raise ValueError("bootstrap initcall missing: " + name)
     if any(key.startswith("__initcall_") and "gps_mod_init" in key for key in symbols):
         raise ValueError("GPS still initializes before the loader")
+    dispatch = verify_dispatch(elf.read_bytes())
+    if not dispatch["passed"]:
+        raise ValueError("Built-in runtime dispatcher gate failed: " + "; ".join(dispatch["errors"]))
     build_log = (out / "build.log").read_text(errors="replace")
     errors = [line for line in build_log.splitlines() if re.search(
         r"section mismatch|WARNING:.*(?:undefined!|has no CRC!|version generation failed)|duplicate symbol|multiple definition", line, re.I)]
@@ -133,6 +142,7 @@ def verify(root, out, nm, mode):
               "files": {name: {"path": path.relative_to(out).as_posix(), "sha256": sha(path)}
                         for name, path in tracked.items()},
               "strong_entries": {key: symbols[key] for key in ENTRIES + (CONNFEM_ENTRY,)}, "lifetime": lifetime,
+              "runtime_dispatch": dispatch,
               "initialization": "connfem/wmtdetect bootstrap; wmt_loader ioctl common, BT, GPS, FM, WLAN",
               "limitations": ["Device-node permissions, firmware initialization and Wi-Fi/BT hardware require a fresh boot test.",
                               "Remaining legacy vendor insmod errors do not establish driver initialization success."]}
