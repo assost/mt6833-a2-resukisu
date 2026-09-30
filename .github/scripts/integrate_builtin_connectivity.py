@@ -72,6 +72,20 @@ endif"""
 
 
 def patch_runtime(conn):
+    path = conn / "gps/gps_stp/gps_emi.c"
+    text = path.read_text(encoding="utf-8")
+    old = """#if defined(GPS_EMI_NEW_API)
+\tstruct emimpu_region_t region_info;
+\tmemset((void *)&region_info, 0x0, sizeof(region_info));
+
+\tint emimpu_ret1, emimpu_ret2, emimpu_ret3, emimpu_ret4, emimpu_ret5, emimpu_ret6;"""
+    new = """#if defined(GPS_EMI_NEW_API)
+\tstruct emimpu_region_t region_info;
+\tint emimpu_ret1, emimpu_ret2, emimpu_ret3, emimpu_ret4, emimpu_ret5, emimpu_ret6;
+
+\tmemset((void *)&region_info, 0x0, sizeof(region_info));"""
+    write(path, replace_once(text, old, new, "gps EMI C90 declaration order"))
+
     path = conn / "gps/gps_stp/stp_chrdev_gps.c"
     text = path.read_text(encoding="utf-8")
     text = replace_once(text, "static int __init gps_mod_init(void)", "static int gps_mod_init(void)", "gps lifetime")
