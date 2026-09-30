@@ -83,13 +83,18 @@ jobs:
             out/vdso-early-validation.json
             out/vdso-validation.json
             out/arch/arm64/kernel/vdso/vdso.so
-            out/connectivity/
+            out/builtin-connectivity-report.json
+            out/builtin-connectivity-source-manifest.json
+            out/builtin-connectivity-source-evidence.zip
+            out/builtin-connectivity-commands.json
+            out/vmlinux.symbols
+            out/System.map
+            out/modules.builtin
             out/Module.symvers
           if-no-files-found: warn
 
   kernel:
     name: ReSukiSU and SUSFS kernel
-    needs: stock
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
@@ -158,6 +163,12 @@ jobs:
             out/vdso-early-validation.json
             out/vdso-validation.json
             out/arch/arm64/kernel/vdso/vdso.so
-            out/connectivity/
+            out/builtin-connectivity-report.json
+            out/builtin-connectivity-source-manifest.json
+            out/builtin-connectivity-source-evidence.zip
+            out/builtin-connectivity-commands.json
+            out/vmlinux.symbols
+            out/System.map
+            out/modules.builtin
             out/Module.symvers
           if-no-files-found: warn
