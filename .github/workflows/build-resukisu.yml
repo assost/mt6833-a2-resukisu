@@ -90,6 +90,8 @@ jobs:
             out/vmlinux.symbols
             out/System.map
             out/modules.builtin
+            out/process-reclaim-repair.json
+            out/process-reclaim-source.c
             out/Module.symvers
           if-no-files-found: warn
 
@@ -170,5 +172,7 @@ jobs:
             out/vmlinux.symbols
             out/System.map
             out/modules.builtin
+            out/process-reclaim-repair.json
+            out/process-reclaim-source.c
             out/Module.symvers
           if-no-files-found: warn

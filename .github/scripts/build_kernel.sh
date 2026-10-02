@@ -19,6 +19,8 @@ mkdir -p "${TMPDIR}" out
 
 # Bind the seven drivers into this Image before compilation.
 python3 .github/scripts/integrate_builtin_connectivity.py
+# Patch the restored vendor alias without changing the pinned vendor cache.
+python3 .github/scripts/fix_process_reclaim.py --root . --out out
 
 make O=out k6833v1_64_k419_defconfig
 # Trust the factory public module certificate while preserving forced verification.
@@ -85,3 +87,6 @@ ls -lh out/arch/arm64/boot/Image.gz
 make O=out modules.builtin
 llvm-objcopy --strip-debug out/vmlinux out/vmlinux.symbols
 python3 .github/scripts/verify_builtin_connectivity.py --mode "${MODE}" --nm llvm-nm
+
+# Recheck the exact source overlay after compilation before publishing evidence.
+python3 .github/scripts/fix_process_reclaim.py --root . --out out
